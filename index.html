@@ -589,7 +589,7 @@ const save = () => { try { localStorage.setItem(LSK, JSON.stringify(S)); } catch
 // ---- Intervals.icu ----
 async function icuFetch(url, opt = {}) {
   if (!S.keys.icu) throw new Error('Mangler Intervals.icu API-nøgle (Indstillinger).');
-  const r = await fetch(url, { ...opt, headers: { Authorization: 'Basic ' + btoa('API_KEY:' + S.keys.icu), 'Content-Type': 'application/json' } });
+  const r = await netFetch(url, { ...opt, headers: { Authorization: 'Basic ' + btoa('API_KEY:' + S.keys.icu), 'Content-Type': 'application/json' } }, 'Intervals.icu');
   const t = await r.text();
   if (!r.ok) throw new Error(`Intervals.icu ${r.status}: ${t.slice(0, 200)}`);
   try { return t ? JSON.parse(t) : null; } catch (e) { return t; }
@@ -609,6 +609,13 @@ async function uploadPlan(plan) {
 }
 
 // ---- Claude ----
+// fetch med ét automatisk genforsøg ved netværksfejl (Safari: "Load failed") og en forståelig besked
+async function netFetch(url, opt, who) {
+  for (let i = 0; i < 2; i++) {
+    try { return await fetch(url, opt); }
+    catch (e) { if (i === 1) throw new Error(`Kunne ikke nå ${who || 'serveren'} ("${(e && e.message) || 'netværksfejl'}"). Tjek forbindelsen, og bliv i appen, mens den arbejder (skifter du app eller låser skærmen, afbrydes kaldet). Slå evt. VPN/indholdsblokering fra for denne side, og prøv igen.`); await new Promise(r => setTimeout(r, 1500)); }
+  }
+}
 // Finder det første komplette JSON-objekt i en tekst (tåler tekst omkring og klammer inde i strenge).
 function extractJson(t) {
   t = String(t || '').replace(/```(?:json)?/gi, '');
@@ -624,9 +631,9 @@ function extractJson(t) {
   return null;
 }
 async function claudeCall(system, user, max) {
-  const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
+  const r = await netFetch('https://api.anthropic.com/v1/messages', { method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': S.keys.anthropic, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-    body: JSON.stringify({ model: S.keys.model, max_tokens: max, system, messages: [{ role: 'user', content: user }] }) });
+    body: JSON.stringify({ model: S.keys.model, max_tokens: max, system, messages: [{ role: 'user', content: user }] }) }, 'Anthropic');
   const j = await r.json();
   if (!r.ok) throw new Error((j.error && j.error.message) || ('Claude API ' + r.status));
   return { text: j.content.map(b => b.text || '').join(''), cut: j.stop_reason === 'max_tokens' };
@@ -714,9 +721,9 @@ async function coachAgent() {
   if (!S.keys.anthropic) throw new Error('Mangler Anthropic API-nøgle (Indstillinger).');
   const hist = S.chat.slice(-12).map(m => ({ role: m.role, content: m.text }));
   while (hist.length && hist[0].role !== 'user') hist.shift();
-  const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
+  const r = await netFetch('https://api.anthropic.com/v1/messages', { method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': S.keys.anthropic, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-    body: JSON.stringify({ model: S.keys.model, max_tokens: 1500, system: COACH_SYSTEM + '\n\nKONTEKST (JSON):\n' + JSON.stringify(coachContext()), messages: hist }) });
+    body: JSON.stringify({ model: S.keys.model, max_tokens: 1500, system: COACH_SYSTEM + '\n\nKONTEKST (JSON):\n' + JSON.stringify(coachContext()), messages: hist }) }, 'Anthropic');
   const j = await r.json();
   if (!r.ok) throw new Error((j.error && j.error.message) || ('Claude API ' + r.status));
   const t = j.content.map(b => b.text || '').join(''); let out = null;
@@ -1188,7 +1195,7 @@ async function sendCoach(text) {
   setTimeout(() => { const f = $('#cf'); if (f && f.scrollIntoView) f.scrollIntoView({ block: 'end' }); }, 0);
 }
 
-const APP_VERSION = '2026-10-25 c (robust JSON)';
+const APP_VERSION = '2026-10-25 d (netværk)';
 function render() {
   const tabs = [['plan', 'Plan'], ['events', 'Events'], ['kost', 'Kost'], ['weight', 'Vægt'], ['coach', 'Coach'], ['health', 'Helbred'], ['zones', 'Zoner'], ['settings', 'Indstil.']];
   const body = { plan: viewPlan, events: viewEvents, kost: viewKost, weight: viewWeight, coach: viewCoach, health: viewHealth, zones: viewZones, settings: viewSettings }[S.tab]();
