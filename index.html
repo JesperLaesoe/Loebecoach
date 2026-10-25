@@ -609,16 +609,38 @@ async function uploadPlan(plan) {
 }
 
 // ---- Claude ----
-async function claude(system, user, max = 2500) {
-  if (!S.keys.anthropic) throw new Error('Mangler Anthropic API-nøgle (Indstillinger).');
+// Finder det første komplette JSON-objekt i en tekst (tåler tekst omkring og klammer inde i strenge).
+function extractJson(t) {
+  t = String(t || '').replace(/```(?:json)?/gi, '');
+  for (let s = t.indexOf('{'); s >= 0; s = t.indexOf('{', s + 1)) {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = s; i < t.length; i++) {
+      const c = t[i];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') inStr = true; else if (c === '{') depth++; else if (c === '}' && --depth === 0) { try { return JSON.parse(t.slice(s, i + 1)); } catch (e) { depth = -1; break; } }
+    }
+    if (depth > 0) return null; // objektet startede men blev aldrig lukket (afskåret svar): returnér aldrig et delobjekt indeni
+  }
+  return null;
+}
+async function claudeCall(system, user, max) {
   const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': S.keys.anthropic, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
     body: JSON.stringify({ model: S.keys.model, max_tokens: max, system, messages: [{ role: 'user', content: user }] }) });
   const j = await r.json();
   if (!r.ok) throw new Error((j.error && j.error.message) || ('Claude API ' + r.status));
-  const t = j.content.map(b => b.text || '').join(''), m = t.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error('Agenten returnerede ikke JSON.');
-  return JSON.parse(m[0]);
+  return { text: j.content.map(b => b.text || '').join(''), cut: j.stop_reason === 'max_tokens' };
+}
+async function claude(system, user, max = 2500) {
+  if (!S.keys.anthropic) throw new Error('Mangler Anthropic API-nøgle (Indstillinger).');
+  let res = await claudeCall(system, user, max), out = res.cut ? null : extractJson(res.text);
+  if (!out) { // afskåret eller ulæseligt svar: prøv én gang igen med mere plads og krav om kompakt, gyldigt JSON
+    const hint = '\n\nVIGTIGT: Dit forrige svar var ikke gyldigt eller komplet JSON. Svar KUN med ét kompakt, gyldigt JSON-objekt uden tekst udenom, uden kommentarer og med korte tekster (højst ca. 150 tegn pr. tekstfelt).';
+    const u2 = typeof user === 'string' ? user + hint : user.concat([{ type: 'text', text: hint }]);
+    res = await claudeCall(system, u2, Math.min(16000, Math.round(max * 1.8))); out = res.cut ? null : extractJson(res.text);
+  }
+  if (!out) throw new Error('Agenten returnerede ikke læseligt svar (to forsøg). Prøv igen om lidt.');
+  return out;
 }
 
 // ===== AGENT 1: PLAN-AGENT (træningsviden) =====
@@ -637,7 +659,7 @@ Svar med JSON: {"verdict":"ok"|"adjust","summary":"2-3 sætninger på dansk","we
 async function planAgentReview(plan) {
   const payload = { i_dag: plan.built, profil: S.profile, events: S.events, realisme: plan.feas && plan.feas.text,
     restitution: (() => { const r = recoverySignal(S.health || {}, ymd(new Date())); return { niveau: r.level, signaler: r.flags }; })(), løbepas_info: plan.runsInfo, styrketræning_dage_pr_uge: (S.nutrition.strengthDays || []).length, uger: plan.weeks.map(w => ({ mandag: w.monday, fase: w.phase, km: w.km, aflastning: !!w.cutback, løbepas: w.runs, pas: w.sessions })), advarsler: plan.warnings };
-  const out = await claude(PLAN_SYSTEM, JSON.stringify(payload));
+  const out = await claude(PLAN_SYSTEM, JSON.stringify(payload), 4000);
   const valid = new Set(plan.weeks.map(w => w.monday)), ov = [];
   for (const o of (out.week_overrides || [])) {
     if (!valid.has(o.monday)) continue;
@@ -698,7 +720,7 @@ async function coachAgent() {
   const j = await r.json();
   if (!r.ok) throw new Error((j.error && j.error.message) || ('Claude API ' + r.status));
   const t = j.content.map(b => b.text || '').join(''); let out = null;
-  try { const m = t.match(/\{[\s\S]*\}/); if (m) out = JSON.parse(m[0]); } catch (e) { out = null; }
+  out = extractJson(t);
   if (!out || typeof out.reply !== 'string') return { text: t.trim() || 'Jeg fik intet svar – prøv igen.', actions: [] };
   return { text: out.reply.trim(), actions: cleanCoachActions(out.actions) };
 }
