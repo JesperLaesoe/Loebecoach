@@ -1069,36 +1069,54 @@ function smoothPath(pts, close) { // Catmull-Rom → kubiske Bézier-kurver
   }
   return p + (close ? 'Z' : '');
 }
-function figShapes(v, H, cx) { // returnerer {torso, legs[], arms[], head, y} i SVG-enheder (380 enheder = H cm)
-  const s = 380 / H, Y = f => 10 + f * 380, cx0 = cx, torsoW = c => c * 0.36 * s / 2, limbW = c => c / Math.PI * s;
-  const sh = Math.max(0.25 * H * s / 2, torsoW(v.chest) * 1.02), nk = limbW(v.neck) / 2, ch = torsoW(v.chest), wa = torsoW(v.waist), be = torsoW(v.belly), hi = torsoW(v.hip);
-  const right = [[cx0 + nk, Y(.14)], [cx0 + nk * 1.2, Y(.17)], [cx0 + sh, Y(.2)], [cx0 + ch, Y(.28)], [cx0 + wa, Y(.4)], [cx0 + be, Y(.44)], [cx0 + hi, Y(.52)]];
-  const left = right.map(([x, y]) => [2 * cx0 - x, y]).reverse();
-  const torso = smoothPath(right.concat([[cx0 + hi * .55, Y(.545)], [cx0, Y(.55)], [2 * cx0 - (cx0 + hi * .55), Y(.545)]], left), true);
-  const tw = limbW(v.thigh), leg = sgn => { const x0 = cx0 + sgn * Math.max(tw / 2 + 1, hi * .96 - tw / 2), w = [tw, tw * .88, tw * .62, tw * .5, tw * .4];
-    const ys = [.53, .62, .73, .86, .97]; const outer = ys.map((y, i) => [x0 + sgn * (w[i] / 2) + sgn * (i ? 0 : 0), Y(y)]), inner = ys.map((y, i) => [x0 - sgn * (w[i] / 2) * (i ? 1 : 1) + (i ? sgn * w[i] * .0 : 0), Y(y)]).reverse();
-    return smoothPath(outer, false) + 'L' + inner[0][0].toFixed(1) + ',' + inner[0][1].toFixed(1) + smoothPath(inner, false).replace(/^M[^C]*/, '') + 'Z'; };
-  const aw = limbW(v.arm), arm = sgn => `M${(cx0 + sgn * (sh - aw * .35)).toFixed(1)},${Y(.215)}L${(cx0 + sgn * (Math.max(hi, ch) + aw * .9)).toFixed(1)},${Y(.49)}`;
-  return { torsoR: right, torso, legs: [leg(1), leg(-1)], arms: [arm(1), arm(-1)], armW: aw, head: { cx: cx0, cy: Y(.065), r: 0.058 * 380 }, neck: { x: cx0 - nk, y: Y(.115), w: nk * 2, h: Y(.17) - Y(.115) }, Y };
+const FIG_EX = 2.1; // karikatur: afvigelse fra typisk værdi forstørres, så ændringer kan ses
+function figShapes(v, H, cx, sex) { // tegneserie-figur: 380 enheder = H cm; alle bredder fra omkredsmål
+  const s = 380 / H, ref = FIG_DEF[sex === 'k' ? 'k' : 'm'], Y = f => 10 + f * 380;
+  const eff = (k, c) => { const r = (k === 'belly' ? ref.waist * 1.03 : ref[k]) * H; return Math.max(r * .6, r + (c - r) * FIG_EX); };
+  const tw = k => eff(k, v[k]) * 0.36 * s / 2, lw = k => eff(k, v[k]) / Math.PI * s; // halv torsobredde / lemmediameter
+  const ch = tw('chest'), wa = tw('waist'), be = tw('belly'), hi = tw('hip'), nk = Math.max(8, lw('neck') / 2), sh = Math.max(ch * 1.04, 0.2 * H * s / 2), aw = Math.max(9, lw('arm') * .85), th = Math.max(10, lw('thigh'));
+  const M = pts => pts.map(([x, y]) => [2 * cx - x, y]);
+  const shirtR = [[cx + nk, Y(.178)], [cx + sh, Y(.205)], [cx + ch, Y(.29)], [cx + wa, Y(.4)], [cx + be, Y(.455)], [cx + be * .96, Y(.505)]];
+  const shirt = smoothPath(shirtR.concat(M(shirtR).reverse()), true);
+  const side = smoothPath(shirtR, false) + ' ' + smoothPath(M(shirtR), false);
+  const hw = Math.max(hi, be * .94), shorts = [[cx - be * .96, Y(.495)], [cx + be * .96, Y(.495)], [cx + hw, Y(.565)], [cx + hw * .98, Y(.655)], [cx + 3, Y(.655)], [cx, Y(.59)], [cx - 3, Y(.655)], [cx - hw * .98, Y(.655)], [cx - hw, Y(.565)]].map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+  const leg = sg => { const c0 = cx + sg * (hw * .5 + 1.5), w = [Math.min(th, hw - 4), Math.min(th, hw - 4) * .86, th * .62, th * .5, th * .38], ys = [.64, .74, .8, .87, .935];
+    const o = ys.map((y, i) => [c0 + sg * w[i] / 2, Y(y)]), n = ys.map((y, i) => [c0 - sg * w[i] / 2, Y(y)]).reverse();
+    return smoothPath(o, false) + 'L' + n[0][0].toFixed(1) + ',' + n[0][1].toFixed(1) + smoothPath(n, false).replace(/^M[^C]*/, '') + 'Z'; };
+  const shoe = sg => { const c0 = cx + sg * (hw * .5 + 1.5), w = Math.max(9, th * .38); return { x: c0 - w * .9 - (sg > 0 ? 0 : 6), y: Y(.935), w: w * 1.8 + 6, h: Y(.985) - Y(.935) }; };
+  const ex = sg => cx + sg * (Math.max(be, ch) + aw * .85), sx = sg => cx + sg * (sh - aw * .3), ay0 = Y(.225), ay1 = Y(.5), lerp = (p, q, t) => p + (q - p) * t;
+  const arm = sg => ({ x0: sx(sg), y0: ay0, xm: lerp(sx(sg), ex(sg), .38), ym: lerp(ay0, ay1, .38), x1: ex(sg), y1: ay1 });
+  return { shirt, side, shorts, legs: [leg(1), leg(-1)], shoes: [shoe(1), shoe(-1)], arms: [arm(1), arm(-1)], aw, nk, head: { cx, cy: Y(.085), r: .075 * 380 }, neckY: [Y(.14), Y(.19)], cx, Y, tw: { neck: nk, chest: ch, waist: wa, belly: be, hip: hw, thigh: hw * .5 + th / 2 + 2, arm: ex(1) - cx + aw / 2 } };
+}
+function figDrawn(g, o) { // o.ghost: kun stiplet omrids
+  const L = '#2b2b35', skin = 'var(--skin)', sw = 1.6, dash = o.ghost ? ' stroke-dasharray="3 3"' : '';
+  if (o.ghost) { const gs = 'fill="none" stroke="var(--mut)" stroke-width="1.3"' + dash + ' stroke-linejoin="round"';
+    return `<g>${g.legs.map(p => `<path d="${p}" ${gs}/>`).join('')}<path d="${g.side}" ${gs}/><polygon points="${g.shorts}" ${gs}/>${g.arms.map(a => { const sg = a.x1 > g.cx ? 1 : -1, o = sg * g.aw / 2; return `<path d="M${(a.x0 + o).toFixed(1)},${a.y0.toFixed(1)}L${(a.x1 + o).toFixed(1)},${a.y1.toFixed(1)}" ${gs}/>`; }).join('')}</g>`; }
+  const c = g.cx, r = g.head.r, hy = g.head.cy;
+  const armsSvg = g.arms.map(a => `<path d="M${a.xm.toFixed(1)},${a.ym.toFixed(1)}L${a.x1.toFixed(1)},${a.y1.toFixed(1)}" stroke="${L}" stroke-width="${(g.aw * .78 + 2 * sw).toFixed(1)}" stroke-linecap="round" fill="none"/><path d="M${a.xm.toFixed(1)},${a.ym.toFixed(1)}L${a.x1.toFixed(1)},${a.y1.toFixed(1)}" stroke="${skin}" stroke-width="${(g.aw * .78).toFixed(1)}" stroke-linecap="round" fill="none"/>`
+    + `<path d="M${a.x0.toFixed(1)},${a.y0.toFixed(1)}L${a.xm.toFixed(1)},${a.ym.toFixed(1)}" stroke="${L}" stroke-width="${(g.aw * 1.1 + 2 * sw).toFixed(1)}" stroke-linecap="round" fill="none"/><path d="M${a.x0.toFixed(1)},${a.y0.toFixed(1)}L${a.xm.toFixed(1)},${a.ym.toFixed(1)}" stroke="var(--shirt)" stroke-width="${(g.aw * 1.1).toFixed(1)}" stroke-linecap="round" fill="none"/>`).join('');
+  const legs = g.legs.map(p => `<path d="${p}" fill="${skin}" stroke="${L}" stroke-width="${sw}" stroke-linejoin="round"/>`).join('');
+  const shoes = g.shoes.map(s => `<rect x="${s.x.toFixed(1)}" y="${s.y.toFixed(1)}" width="${s.w.toFixed(1)}" height="${s.h.toFixed(1)}" rx="6" fill="#3b3b48" stroke="${L}" stroke-width="${sw}"/>`).join('');
+  const hair = `<path d="M${(c - r * .97).toFixed(1)},${(hy - r * .1).toFixed(1)}A${r.toFixed(1)},${r.toFixed(1)} 0 0 1 ${(c + r * .97).toFixed(1)},${(hy - r * .1).toFixed(1)}Q${c},${(hy - r * .72).toFixed(1)} ${(c - r * .97).toFixed(1)},${(hy - r * .1).toFixed(1)}Z" fill="#5a4030" stroke="${L}" stroke-width="${sw}" stroke-linejoin="round"/>`;
+  const face = `<circle cx="${(c - r * .38).toFixed(1)}" cy="${(hy + r * .02).toFixed(1)}" r="${(r * .09).toFixed(1)}" fill="${L}"/><circle cx="${(c + r * .38).toFixed(1)}" cy="${(hy + r * .02).toFixed(1)}" r="${(r * .09).toFixed(1)}" fill="${L}"/><path d="M${(c - r * .4).toFixed(1)},${(hy + r * .38).toFixed(1)}Q${c},${(hy + r * .72).toFixed(1)} ${(c + r * .4).toFixed(1)},${(hy + r * .38).toFixed(1)}" stroke="${L}" stroke-width="1.6" fill="none" stroke-linecap="round"/>`;
+  const be = g.tw.belly, belly = `<path d="M${(c - be * .62).toFixed(1)},${g.Y(.44).toFixed(1)}Q${c},${g.Y(.5 + (be > g.tw.chest * .85 ? .012 : 0)).toFixed(1)} ${(c + be * .62).toFixed(1)},${g.Y(.44).toFixed(1)}" stroke="#000" stroke-opacity=".16" stroke-width="1.6" fill="none"/>`;
+  return `<g>${legs}${shoes}<polygon points="${g.shorts}" fill="var(--shorts)" stroke="${L}" stroke-width="${sw}" stroke-linejoin="round"/>${armsSvg}<rect x="${(c - g.nk).toFixed(1)}" y="${g.neckY[0].toFixed(1)}" width="${(g.nk * 2).toFixed(1)}" height="${(g.neckY[1] - g.neckY[0]).toFixed(1)}" fill="${skin}" stroke="${L}" stroke-width="${sw}"/>
+    <path d="${g.shirt}" fill="var(--shirt)" stroke="none"/><path d="${g.side}" fill="none" stroke="${L}" stroke-width="${sw}" stroke-linejoin="round"/>${belly}<circle cx="${c}" cy="${hy.toFixed(1)}" r="${r.toFixed(1)}" fill="${skin}" stroke="${L}" stroke-width="${sw}"/>${hair}${face}</g>`;
 }
 function figCard(ms, N) {
   if (!ms.length) return '';
   const H = N.heightCm > 120 ? N.heightCm : 180, dates = ms.map(m => m.date), sel = dates.includes(figDate) ? figDate : dates[dates.length - 1], firstD = dates[0], cx = 95;
-  const A = figValues(ms, sel, H, N.sex), B = figValues(ms, firstD, H, N.sex), a = figShapes(A.v, H, cx), b = figShapes(B.v, H, cx), showCmp = sel !== firstD;
-  const lvl = { neck: .15, chest: .28, waist: .4, belly: .44, hip: .52, thigh: .62, arm: .33 }, df = x => { const d = Math.round(x * 10) / 10; return d === 0 ? '' : ' (' + (d > 0 ? '+' : '−') + Math.abs(d).toString().replace('.', ',') + ')'; };
-  const sides = g => { const pts = g.torsoR, mir = p => [2 * cx - p[0], p[1]]; return smoothPath(pts, false) + ' ' + smoothPath(pts.map(mir), false); };
-  const draw = (g, fill, stroke, sw, dash) => { const st = `stroke="${stroke}" stroke-width="${sw}"${dash ? ' stroke-dasharray="3 3"' : ''} stroke-linejoin="round"`;
-    return `<g>${g.arms.map(p => `<path d="${p}" fill="none" stroke="${stroke}" stroke-width="${(g.armW + 2 * sw).toFixed(1)}" stroke-linecap="round" ${dash ? 'stroke-dasharray="3 3"' : ''}/>`).join('')}${fill === 'none' ? '' : g.arms.map(p => `<path d="${p}" fill="none" stroke="${fill}" stroke-width="${g.armW.toFixed(1)}" stroke-linecap="round"/>`).join('')}
-    ${g.legs.map(p => `<path d="${p}" fill="${fill}" ${st}/>`).join('')}<rect x="${g.neck.x.toFixed(1)}" y="${g.neck.y.toFixed(1)}" width="${g.neck.w.toFixed(1)}" height="${g.neck.h.toFixed(1)}" fill="${fill}" stroke="none"/><circle cx="${g.head.cx}" cy="${g.head.cy.toFixed(1)}" r="${g.head.r.toFixed(1)}" fill="${fill}" ${st}/>
-    <path d="${g.torso}" fill="${fill}" stroke="none"/><path d="${sides(g)}" fill="none" ${st}/></g>`; };
+  const A = figValues(ms, sel, H, N.sex), B = figValues(ms, firstD, H, N.sex), a = figShapes(A.v, H, cx, N.sex), b = figShapes(B.v, H, cx, N.sex), showCmp = sel !== firstD;
+  const lvl = { neck: .155, chest: .29, waist: .4, belly: .45, hip: .58, thigh: .72, arm: .4 }, df = x => { const d = Math.round(x * 10) / 10; return d === 0 ? '' : ' (' + (d > 0 ? '+' : '−') + Math.abs(d).toString().replace('.', ',') + ')'; };
   const want = MEAS.map(([k, n]) => ({ k, n, y: 10 + lvl[k] * 380 })).sort((p, q) => p.y - q.y); want.forEach((l, i) => { if (i && l.y < want[i - 1].y + 17) l.y = want[i - 1].y + 17; });
-  const labels = want.map(l => `<line x1="${(cx + 52).toFixed(0)}" y1="${(10 + lvl[l.k] * 380).toFixed(0)}" x2="160" y2="${(l.y - 3).toFixed(0)}" stroke="var(--line)" stroke-width="1"/><text x="164" y="${l.y.toFixed(0)}" font-size="10" fill="var(--fg)">${l.n.split(' ')[0].split('/')[0]} ${A.v[l.k]}${A.est[l.k] ? '*' : ''}${showCmp && !A.est[l.k] && !B.est[l.k] ? df(A.v[l.k] - B.v[l.k]) : ''}</text>`).join('');
+  const xr = Math.max(...Object.values(a.tw)) + cx + 6, lx = Math.max(xr, 158);
+  const labels = want.map(l => `<line x1="${(cx + a.tw[l.k] + 2).toFixed(0)}" y1="${(10 + lvl[l.k] * 380).toFixed(0)}" x2="${lx}" y2="${(l.y - 3).toFixed(0)}" stroke="var(--line)" stroke-width="1"/><text x="${lx + 3}" y="${l.y.toFixed(0)}" font-size="10" fill="var(--fg)">${l.n.split(' ')[0].split('/')[0]} ${A.v[l.k]}${A.est[l.k] ? '*' : ''}${showCmp && !A.est[l.k] && !B.est[l.k] ? df(A.v[l.k] - B.v[l.k]) : ''}</text>`).join('');
   const w = [...S.weights].sort((x, y) => x.date.localeCompare(y.date)).filter(x => x.date <= sel).pop();
-  return `<div class="card"><b>Din figur</b> <span class="mut">(skematisk ud fra dine mål)</span>
+  return `<div class="card"><b>Din figur</b> <span class="mut">(tegneserie ud fra dine mål)</span>
     <label>Måling<select data-act="figsel">${[...dates].reverse().map(d => `<option value="${esc(d)}" ${d === sel ? 'selected' : ''}>${esc(d)}${d === firstD ? ' (første)' : ''}</option>`).join('')}</select></label>
-    <svg viewBox="0 0 270 400" class="chart" style="max-width:340px;display:block;margin:6px auto" role="img" aria-label="Skematisk figur ud fra omkredsmål">
-      ${showCmp ? draw(b, 'none', 'var(--mut)', 1.2, true) : ''}${draw(a, 'var(--figfill)', 'var(--pri)', 1.6, false)}${labels}</svg>
-    <span class="mut">${w ? esc(w.date) + ': ' + w.kg + ' kg · ' : ''}Højde ${H} cm. ${showCmp ? 'Stiplet streg = første måling.' : 'Vælg en senere måling for at sammenligne med den første.'} ${Object.keys(A.est).length ? '* = ikke målt endnu, vist som typisk værdi for din højde.' : ''} Figuren er en forenklet tegning, ikke et billede af dig – forskelle mellem målinger er det, der er interessant.</span></div>`;
+    <svg viewBox="0 0 280 400" class="chart" style="max-width:360px;display:block;margin:6px auto;--skin:#f2c9a5;--shirt:#5b9cf5;--shorts:#46546e" role="img" aria-label="Tegneseriefigur ud fra omkredsmål">
+      ${showCmp ? figDrawn(b, { ghost: true }) : ''}${figDrawn(a, {})}${labels}</svg>
+    <span class="mut">${w ? esc(w.date) + ': ' + w.kg + ' kg · ' : ''}Højde ${H} cm. ${showCmp ? 'Stiplet omrids = første måling.' : 'Vælg en senere måling for at sammenligne med den første.'} ${Object.keys(A.est).length ? '* = ikke målt endnu, vist som typisk værdi for din højde.' : ''} Figuren er en karikatur: forskelle fra en typisk krop er forstørret ca. ${String(FIG_EX).replace('.', ',')} gange, så ændringer er lette at se. Cm-tallene ved siden af er de rigtige.</span></div>`;
 }
 function measCard() {
   const ms = [...(S.measures || [])].sort((a, b) => a.date.localeCompare(b.date));
@@ -1244,7 +1262,7 @@ async function sendCoach(text) {
   setTimeout(() => { const f = $('#cf'); if (f && f.scrollIntoView) f.scrollIntoView({ block: 'end' }); }, 0);
 }
 
-const APP_VERSION = '2026-10-25 f (figur)';
+const APP_VERSION = '2026-10-25 g (karikatur)';
 function render() {
   const tabs = [['plan', 'Plan'], ['events', 'Events'], ['kost', 'Kost'], ['weight', 'Vægt'], ['coach', 'Coach'], ['health', 'Helbred'], ['zones', 'Zoner'], ['settings', 'Indstil.']];
   const body = { plan: viewPlan, events: viewEvents, kost: viewKost, weight: viewWeight, coach: viewCoach, health: viewHealth, zones: viewZones, settings: viewSettings }[S.tab]();
