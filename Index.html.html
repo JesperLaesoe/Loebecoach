@@ -1,0 +1,1187 @@
+<!doctype html>
+<html lang="da"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Løbecoach</title>
+<style>
+:root{--bg:#f6f6f8;--fg:#1c1c22;--mut:#6b6b78;--card:#fff;--line:#dcdce3;--pri:#1d6fe0;--good:#e6f4ea;--warn:#fff4dc;--bad:#fde7e7}
+@media(prefers-color-scheme:dark){:root{--bg:#141418;--fg:#ececf1;--mut:#9a9aa8;--card:#1e1e25;--line:#33333d;--pri:#5b9cf5;--good:#183324;--warn:#3a2f14;--bad:#3d1c1c}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif}
+#app{max-width:760px;margin:0 auto;padding:16px 16px 60px}h1{font-size:22px;margin:4px 0 12px}h3{margin:0 0 8px}
+nav{display:flex;gap:6px;margin-bottom:14px;overflow:auto}nav button{flex:1;white-space:nowrap}
+button{font:inherit;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);cursor:pointer}
+button.pri,nav button.on{background:var(--pri);border-color:var(--pri);color:#fff}button:disabled{opacity:.45;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px}
+.good{background:var(--good)}.warn{background:var(--warn)}.bad{background:var(--bad)}.busy{opacity:.8}.mut{color:var(--mut)}
+label{display:block;margin:8px 0;font-size:13px;color:var(--mut)}label.chk{display:inline-flex;gap:4px;align-items:center;margin:4px 8px 4px 0;color:var(--fg)}
+input,select{display:block;width:100%;margin-top:4px;padding:8px;font:inherit;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
+input[type=checkbox]{display:inline;width:auto;margin:0}.ev{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.pill{background:var(--pri);color:#fff;border-radius:99px;padding:1px 8px;font-size:12px}
+details.wk{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:8px;padding:8px 12px}details.wk>summary{cursor:pointer}
+details.wo{margin:6px 0 0 8px}details.wo>summary{cursor:pointer;font-size:14px}pre{white-space:pre-wrap;background:var(--bg);padding:8px;border-radius:8px;font-size:12.5px;margin:6px 0}
+.ph{font-size:11px;border-radius:6px;padding:1px 6px;background:var(--line)}table{width:100%;border-collapse:collapse}td{padding:4px 6px;border-bottom:1px solid var(--line)}
+.trio{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}nav.sub{margin-bottom:10px}nav.sub button{padding:6px 10px}.chart{width:100%;height:auto;background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:10px}
+.done{text-decoration:line-through;color:var(--mut)}label.shop{display:flex;margin:6px 0}.ev button{flex:none}
+table.tight td{font-size:12px;padding:3px 4px;text-align:right}table.tight td:first-child{text-align:left}code{font-size:12px;word-break:break-all}</style></head>
+<body><div id="app"></div>
+<script>
+// ===== ENGINE: ren logik uden DOM (kan testes i node) =====
+const DAY = 864e5;
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseD = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d, 12); };
+const addD = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const mondayOf = d => { const x = new Date(d); x.setHours(12, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
+const mmss = s => { s = Math.round(s); return Math.floor(s / 60) + ':' + pad(s % 60); };
+const parsePace = t => { const [m, s] = String(t).split(':').map(Number); return m * 60 + (s || 0); };
+const parseTime = t => { const p = String(t).split(':').map(Number); return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + (p[1] || 0); };
+const fmtTime = s => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return (h ? h + ':' + pad(m) : m) + ':' + pad(s % 60); };
+const DOW = ['Søn', 'Man', 'Tir', 'Ons', 'Tor', 'Fre', 'Lør'];
+
+// Tærskelpace (sek/km) ud fra et løbsresultat: pace for ~1 times indsats via Riegel (exp 1.06)
+const thrFromRace = (km, sec) => 3600 / (km * Math.pow(3600 / sec, 1 / 1.06));
+
+// Zoner som % af tærskel-FART (samme konvention som "% Pace" i Intervals.icu)
+const ZN = { easy: [72, 82], rec: [60, 72], steady: [88, 93], thr: [97, 101], vo2: [105, 109], rep: [108, 113], str: [112, 118] };
+const zt = (c, k) => `${c.ZN[k][0]}-${c.ZN[k][1]}% Pace`;
+const midPct = (c, k) => (c.ZN[k][0] + c.ZN[k][1]) / 2;
+const paceOf = (c, k) => c.thr / (midPct(c, k) / 100);
+const paceRange = (c, k) => `${mmss(c.thr / (c.ZN[k][1] / 100))}-${mmss(c.thr / (c.ZN[k][0] / 100))}/km`;
+const minKm = (c, k, m) => m * 60 / paceOf(c, k);
+
+// Ét step: spec {m|km|min|s}, zone-nøgle
+function stp(c, spec, zone) {
+  let txt, km;
+  if (spec.m) { txt = `${spec.m}mtr`; km = spec.m / 1000; }
+  else if (spec.km) { txt = `${spec.km}km`; km = spec.km; }
+  else if (spec.min) { txt = `${spec.min}m`; km = minKm(c, zone, spec.min); }
+  else { txt = `${spec.s}s`; km = minKm(c, zone, spec.s / 60); }
+  return { line: `- ${txt} ${zt(c, zone)}`, km };
+}
+// Blok: titel, gentagelser, [[spec, zone]...]
+function blk(c, title, reps, steps, note) {
+  const ss = steps.map(([sp, z]) => stp(c, sp, z));
+  const km = reps * ss.reduce((a, s) => a + s.km, 0);
+  return { km, lines: [`${title}${reps > 1 ? ' ' + reps + 'x' : ''}${note ? ' (' + note + ')' : ''}`, ...ss.map(s => s.line), ''] };
+}
+const wrap = (c, name, main, wuKm = 2.5, cdKm = 2) => {
+  const w = blk(c, 'Warmup', 1, [[{ km: wuKm }, 'easy']], paceRange(c, 'easy'));
+  const d = blk(c, 'Cooldown', 1, [[{ km: cdKm }, 'easy']]);
+  return { name, km: w.km + main.reduce((a, b) => a + b.km, 0) + d.km, lines: [...w.lines, ...main.flatMap(b => b.lines), ...d.lines] };
+};
+
+// ---- Sessionsbibliotek (progression via k = n'te gang sessionen bruges) ----
+const VO2 = [[6, 400, 1.5, 'rep'], [5, 800, 2, 'vo2'], [4, 1000, 2.5, 'vo2'], [6, 800, 2, 'vo2'], [5, 1000, 2.5, 'vo2'], [4, 1200, 3, 'vo2'], [3, 1600, 3, 'vo2']];
+const THR = [[3, 8], [3, 10], [2, 15], [3, 12], [2, 18], [2, 20]];
+const sVO2 = (c, k) => { const [r, m, rec, z] = VO2[Math.min(k, VO2.length - 1)]; return wrap(c, `Intervaller ${r}x${m}m`, [blk(c, 'Main set', r, [[{ m }, z], [{ min: rec }, 'rec']], paceRange(c, z))]); };
+const sTHR = (c, k) => { const [r, m] = THR[Math.min(k, THR.length - 1)]; return wrap(c, `Tærskel ${r}x${m} min`, [blk(c, 'Main set', r, [[{ min: m }, 'thr'], [{ min: 2 }, 'rec']], paceRange(c, 'thr'))]); };
+const sFART = (c, k) => wrap(c, 'Fartlek 8x1 min', [blk(c, 'Main set', 8 + Math.min(k, 3), [[{ min: 1 }, 'vo2'], [{ min: 1 }, 'rec']], paceRange(c, 'vo2'))]);
+const sRACE = (c, k) => {
+  const long = c.dist >= 15;
+  const plan = long ? (c.dist >= 35 ? [[2, 5], [2, 6], [3, 5], [2, 8]] : [[2, 3], [3, 3], [2, 5], [3, 4]]) : [[4, 1], [5, 1], [6, 1], [4, 1.5]];
+  const [r, km] = plan[Math.min(k, plan.length - 1)];
+  const gp = c.goalPace ? `${mmss(c.goalPace)}/km` : paceRange(c, 'goal');
+  return wrap(c, `Løbstempo ${r}x${km}km`, [blk(c, 'Main set', r, [[{ km }, 'goal'], [{ min: 2 }, 'rec']], gp)]);
+};
+const sSHARP = c => wrap(c, 'Skarphed (kort løbstempo)', [blk(c, 'Main set', 3, [[{ km: c.dist >= 15 ? 1.5 : 0.8 }, 'goal'], [{ min: 2 }, 'rec']])], 2, 1.5);
+const sTEMPO = (c, k) => { const m = [20, 25, 30, 35, 40][Math.min(k, 4)]; return wrap(c, `Tempo ${m} min`, [blk(c, 'Main set', 1, [[{ min: m }, 'thr']], paceRange(c, 'thr'))]); };
+const strides = c => blk(c, 'Strides', 4, [[{ s: 20 }, 'str'], [{ s: 60 }, 'rec']]);
+
+function sEasy(c, km, withStrides, name = 'Rolig løbetur') {
+  const m = blk(c, 'Easy', 1, [[{ km: Math.round(km * 10) / 10 }, 'easy']], paceRange(c, 'easy'));
+  const s = withStrides ? strides(c) : { km: 0, lines: [] };
+  return { name: withStrides ? name + ' + strides' : name, km: m.km + s.km, lines: [...m.lines, ...s.lines] };
+}
+function sLONG(c, km, progressive) {
+  km = Math.round(km);
+  const fin = progressive && km >= 14 ? Math.min(Math.round(km * 0.3), 8) : 0;
+  const steps = fin ? [blk(c, 'Easy', 1, [[{ km: km - fin }, 'easy']], paceRange(c, 'easy')), blk(c, 'Finish', 1, [[{ km: fin }, c.goalPace ? 'goal' : 'steady']], c.goalPace ? `${mmss(c.goalPace)}/km` : paceRange(c, 'steady'))]
+    : [blk(c, 'Long', 1, [[{ km }, 'easy']], paceRange(c, 'easy'))];
+  return { name: `Langtur ${km} km${fin ? ' m. løbstempo-finish' : ''}`, km, lines: steps.flatMap(s => s.lines) };
+}
+function sSHAKE(c) { const m = blk(c, 'Shakeout', 1, [[{ km: 3 }, 'easy']]); const s = blk(c, 'Strides', 3, [[{ s: 20 }, 'str'], [{ s: 60 }, 'rec']]); return { name: 'Opvågningstur + strides', km: 3.5, lines: [...m.lines, ...s.lines] }; }
+function sRACEDAY(c, ev) {
+  const D = ev.distKm, gp = c.goalPace;
+  if (!gp) return { name: ev.name, km: D, lines: [`Race`, `- ${D}km ${zt(c, 'steady')}`, ''] };
+  const pct = c.goalPct, f = (a, b) => `${Math.round(a)}-${Math.round(b)}% Pace`;
+  const a = Math.max(1, Math.round(D * 0.2)), z = Math.max(1, Math.round(D * 0.15)), mid = D - a - z;
+  return { name: ev.name, km: D, lines: [
+    `Kontrolleret start (${mmss(c.thr / ((pct - 1) / 100))}-${mmss(c.thr / ((pct - 3) / 100))}/km)`, `- ${a}km ${f(pct - 3, pct - 1)}`, '',
+    `Løbstempo (${mmss(gp)}/km)`, `- ${mid.toFixed(1).replace(/\.0$/, '')}km ${f(pct - 1, pct + 1)}`, '',
+    'Pres på hvis der er overskud', `- ${z}km ${f(pct, pct + 3)}`, ''] };
+}
+
+// ---- Antal løbepas pr. uge ----
+function pickRunDays(avail, n, longDay, lower) {
+  avail = [...new Set(avail)];
+  if (n >= avail.length) return avail;
+  const circ = (a, b) => { const d = Math.abs(a - b); return Math.min(d, 7 - d); };
+  const chosen = [avail.includes(longDay) ? longDay : avail[0]];
+  while (chosen.length < n) {
+    let best = null;
+    for (const d of avail) {
+      if (chosen.includes(d)) continue;
+      const sc = Math.min(...chosen.map(c => circ(c, d))) - (lower.includes(d) ? 0.5 : 0);
+      if (!best || sc > best.sc) best = { d, sc };
+    }
+    chosen.push(best.d);
+  }
+  return chosen;
+}
+// Anbefalet antal pas ud fra afstanden mellem nuværende tærskel og den tærskel målet kræver
+function recommendRuns(P, dist, gapPct, availCount) {
+  let n = gapPct <= 2 ? 3 : gapPct <= 5 ? 4 : 5;
+  if (dist >= 35) n = Math.max(n, 4); else if (dist >= 15) n = Math.max(n, gapPct > 8 ? 5 : 4);
+  if (P.weeklyKm < 20) n = Math.min(n, 4);
+  return Math.max(3, Math.min(n, availCount, 6));
+}
+
+// ---- Planbygger ----
+function buildPlan(S, startDate) {
+  const P = S.profile, today = new Date(startDate); today.setHours(12, 0, 0, 0);
+  const evs = S.events.filter(e => parseD(e.date) >= today).sort((a, b) => a.date.localeCompare(b.date));
+  const A = evs.find(e => e.prio === 'A');
+  if (!A) return { error: 'Tilføj mindst ét A-event i fremtiden.' };
+  const thr = parsePace(P.thr), raceD = parseD(A.date);
+  if (!(thr > 120 && thr < 600)) return { error: 'Tærskelpace skal være mellem 2:00 og 10:00 /km.' };
+  const c = { thr, dist: A.distKm, ZN: { ...ZN, goal: ZN.steady } };
+  const goalSec = A.goal ? parseTime(A.goal) : null;
+  const wk0 = mondayOf(today), nW = Math.round((mondayOf(raceD) - wk0) / (7 * DAY)) + 1;
+  const taperLen = A.distKm >= 35 ? 3 : A.distKm >= 15 ? 2 : 1, nt = nW - taperLen;
+  // Forventet tærskel på løbsdagen: ~0,4 %/uge træningsfremgang, maks 4 %
+  let feas = null;
+  const gain = Math.min(0.004 * Math.max(nt, 0), 0.04), expThr = thr * (1 - gain);
+  const predSec = (km, th) => km * th * Math.pow(km * th / 3600, 0.06); // Riegel ud fra tærskelpace
+  if (goalSec) {
+    const req = thrFromRace(A.distKm, goalSec), expPred = predSec(A.distKm, expThr), nowPred = predSec(A.distKm, thr);
+    const ok = goalSec >= expPred * 0.995;
+    const tgt = ok ? goalSec : expPred;
+    c.goalPace = tgt / A.distKm; c.goalPct = thr / c.goalPace * 100; c.ZN.goal = [Math.round(c.goalPct - 1), Math.round(c.goalPct + 1)];
+    feas = { ok, requiredThr: req, currentThr: thr, expectedThr: expThr, nowTime: nowPred, expectedTime: expPred, target: tgt,
+      text: ok ? `Målet ${fmtTime(goalSec)} kræver tærskelpace ca. ${mmss(req)}/km. Med din nuværende (${mmss(thr)}/km) og ca. ${Math.round(gain * 1000) / 10}% fremgang frem til løbet er det realistisk.`
+        : `Målet ${fmtTime(goalSec)} kræver tærskelpace ca. ${mmss(req)}/km. Du er på ${mmss(thr)}/km nu (svarer til ca. ${fmtTime(nowPred)}); med typisk fremgang frem til løbet forventer jeg ca. ${fmtTime(expPred)}. Løbstempo-pas og løbsdag er derfor sat til ${mmss(c.goalPace)}/km. Har du en nylig testtid, så skriv den ind (Zoner) – så justerer jeg.` };
+  }
+  const peakCap = A.distKm >= 35 ? 80 : A.distKm >= 15 ? 60 : A.distKm >= 9 ? 50 : 40;
+  const longCap = A.distKm >= 35 ? 32 : A.distKm >= 15 ? 24 : A.distKm >= 9 ? 20 : 16;
+  const taperF = A.distKm >= 35 ? [0.45, 0.65, 0.85] : A.distKm >= 15 ? [0.5, 0.8] : [0.6];
+  const lower = P.lowerDays || [];
+  const avail = P.runDays.length ? P.runDays : [2, 4, 6, 0];
+  const gapPct = goalSec ? Math.max(0, (thr / thrFromRace(A.distKm, goalSec) - 1) * 100) : 0;
+  const recommended = recommendRuns(P, A.distKm, gapPct, avail.length);
+  const target = Math.min(avail.length, P.runsMode && P.runsMode !== 'auto' ? Number(P.runsMode) : recommended);
+  const curRuns = Math.min(target, Math.max(2, P.currentRuns || 3));
+  const runsInfo = { recommended, target, mode: P.runsMode || 'auto', current: curRuns, gapPct };
+  const runsIn = (i, ov) => ov.runs ? Math.min(avail.length, Math.max(2, ov.runs)) : Math.min(target, curRuns + Math.floor(i / 4));
+  // 1) ugevolumener
+  let base = P.weeklyKm, peakRef = P.weeklyKm; const vols = [], phases = [], cut = [];
+  for (let i = 0; i < nW; i++) {
+    const fe = nW - 1 - i;
+    if (fe < taperLen) { vols.push(null); phases.push(fe === 0 ? 'Løbsuge' : 'Nedtrapning'); cut.push(false); continue; }
+    if (i > 0) base = Math.min(base * 1.07, Math.max(peakCap, P.weeklyKm));
+    const isCut = i > 0 && (i + 1) % 4 === 0 && fe > taperLen;
+    vols.push(isCut ? base * 0.8 : base); cut.push(isCut);
+    peakRef = Math.max(peakRef, vols[i]);
+    phases.push(nt >= 9 && i < Math.floor(nt / 3) ? 'Base' : (nt >= 4 && nt - i <= 3 ? 'Specifik' : 'Opbygning'));
+  }
+  for (let i = 0; i < nW; i++) if (vols[i] === null) vols[i] = peakRef * taperF[nW - 1 - i];
+  // 2) uger -> workouts
+  const cnt = { vo2: 0, thr: 0, race: 0, fart: 0, tempo: 0 };
+  const workouts = [], weeks = [], warnings = []; let prevKm = null;
+  for (let i = 0; i < nW; i++) {
+    const mon = addD(wk0, 7 * i), ph = phases[i], ov = (S.overrides || {})[ymd(mon)] || {};
+    const cnt_ = runsIn(i, ov), weekDays = pickRunDays(avail, cnt_, P.longDay, lower);
+    const allDates = weekDays.map(d => addD(mon, (d + 6) % 7));
+    let dates = allDates.filter(d => d >= today && d <= raceD);
+    const others = evs.filter(e => e !== A && parseD(e.date) >= mon && parseD(e.date) < addD(mon, 7) && parseD(e.date) >= today);
+    const raceSet = new Set(others.map(e => e.date));
+    others.forEach(e => { if (!dates.some(d => ymd(d) === e.date)) dates.push(parseD(e.date)); });
+    const isRaceWk = ph === 'Løbsuge';
+    if (isRaceWk && !dates.some(d => ymd(d) === A.date)) dates.push(raceD);
+    dates.sort((a, b) => a - b);
+    if (!dates.length) { weeks.push({ i, monday: ymd(mon), phase: ph, km: 0, factor: 1 }); continue; }
+    let vol = vols[i] * (ov.volume_factor || 1);
+    if (prevKm && !cut[i] && ph !== 'Nedtrapning' && ph !== 'Løbsuge') vol = Math.min(vol, prevKm * 1.1); // aldrig mere end +10% ift. seneste normale uge
+    vol *= Math.min(1, dates.filter(d => !raceSet.has(ymd(d))).length / Math.max(1, weekDays.length));
+    const items = [];
+    const mk = (d, s, cat = 'WORKOUT') => items.push({ date: ymd(d), name: s.name, desc: s.lines.join('\n').trim(), km: Math.round(s.km * 10) / 10, cat, phase: ph });
+    const rd = d => d.getTime();
+    if (isRaceWk) {
+      // A-løbsuge
+      for (const d of dates) {
+        const delta = Math.round((raceD - d) / DAY);
+        if (delta === 0) { mk(d, sRACEDAY(c, A), 'RACE_A'); continue; }
+        if (delta === 1) mk(d, sSHAKE(c));
+        else if (delta >= 3 && delta <= 5 && !items.some(x => x.name.startsWith('Skarphed'))) mk(d, sSHARP(c));
+        else mk(d, sEasy(c, delta >= 3 ? 5 : 4, delta >= 3));
+      }
+    } else {
+      const raceDates = others.map(e => parseD(e.date));
+      const nearRace = (d, before, after) => raceDates.some(r => { const x = Math.round((d - r) / DAY); return x >= -before && x <= after; });
+      const nonRace = dates.filter(d => !raceSet.has(ymd(d)));
+      const longDate = raceDates.length ? null : (nonRace.find(d => d.getDay() === P.longDay) || nonRace[nonRace.length - 1]);
+      let cands = nonRace.filter(d => (!longDate || Math.abs(d - longDate) > DAY) && !lower.includes((d.getDay() + 6) % 7) && !lower.includes(d.getDay()) && !nearRace(d, 2, 2));
+      if (!cands.length) cands = nonRace.filter(d => d !== longDate && !nearRace(d, 2, 2));
+      let nQ = ph === 'Base' || cut[i] || nonRace.length < 4 ? 1 : (ph === 'Nedtrapning' ? 1 : 2);
+      if (raceDates.length) nQ = Math.min(nQ, 1);
+      if (ov.max_quality !== undefined) nQ = Math.min(nQ, ov.max_quality);
+      nQ = Math.min(nQ, cands.length);
+      const qd = nQ === 0 ? [] : nQ === 1 ? [cands[0]] : [cands[0], cands[cands.length - 1]];
+      const sess = new Map();
+      qd.forEach((d, idx) => {
+        let s;
+        if (ph === 'Base') s = sFART(c, cnt.fart++);
+        else if (ph === 'Nedtrapning') s = c.goalPace ? sSHARP(c) : sTHR(c, cnt.thr++);
+        else if (ph === 'Specifik') s = (idx === 0 && (nQ === 1 || nQ === 2)) ? (c.goalPace ? sRACE(c, cnt.race++) : sVO2(c, cnt.vo2++)) : sTHR(c, cnt.thr++);
+        else s = nQ === 2 ? (idx === 0 ? sVO2(c, cnt.vo2++) : sTHR(c, cnt.thr++)) : (i % 2 === 0 ? sTHR(c, cnt.thr++) : sVO2(c, cnt.vo2++));
+        sess.set(rd(d), s);
+      });
+      const Q = [...sess.values()].reduce((a, s) => a + s.km, 0);
+      const nEasy = nonRace.filter(d => d !== longDate && !sess.has(rd(d))).length;
+      let L = 0;
+      if (longDate) { const share = nonRace.length >= 4 ? 0.3 : nonRace.length === 3 ? 0.38 : 0.5; L = Math.max(8, Math.min(longCap, Math.round(vol * share))); if (ph === 'Nedtrapning') L = Math.min(L, Math.round(vol * 0.3)); }
+      const easyKm = nEasy ? Math.max(4, Math.min((vol - L - Q) / nEasy, (L || 12) * 0.8)) : 0;
+      let strideDone = false;
+      for (const d of dates) {
+        if (raceSet.has(ymd(d))) { const ev = others.find(e => e.date === ymd(d)); mk(d, sRACEDAY(c, ev.goal ? { ...ev } : ev), 'RACE_' + ev.prio); continue; }
+        if (sess.has(rd(d))) { mk(d, sess.get(rd(d))); continue; }
+        if (d === longDate) { mk(d, sLONG(c, L, (ph === 'Opbygning' || ph === 'Specifik') && !cut[i])); continue; }
+        const short = nearRace(d, 2, 1);
+        const st = !strideDone && ph !== 'Base' ? true : (!strideDone && ph === 'Base');
+        if (st && !short) strideDone = true;
+        mk(d, sEasy(c, short ? Math.min(easyKm, 5) : easyKm, st && !short));
+      }
+    }
+    const km = items.reduce((a, x) => a + x.km, 0);
+    if (prevKm && !cut[i] && ph !== 'Nedtrapning' && ph !== 'Løbsuge' && km > prevKm * 1.15) warnings.push(`Uge ${ymd(mon)}: +${Math.round((km / prevKm - 1) * 100)}% ift. seneste normale uge.`);
+    if (!cut[i]) prevKm = km;
+    workouts.push(...items);
+    weeks.push({ i, monday: ymd(mon), phase: ph, km: Math.round(km * 10) / 10, factor: ov.volume_factor || 1, cutback: cut[i], sessions: items.length, runs: cnt_ });
+  }
+  workouts.forEach((w, n) => { w.external_id = `lc-${w.date}`; });
+  const lr = workouts.find(w => w.name.startsWith('Langtur'));
+  if (lr && lower.includes((parseD(lr.date).getDay() + 6) % 7)) warnings.push(`Din langtur (${DOW[parseD(lr.date).getDay()]}) ligger dagen efter en tung underkropsdag – flyt enten langtur eller underkropstræning.`);
+  return { A, feas, weeks, workouts, warnings, ctx: c, built: ymd(today), runsInfo };
+}
+
+// ---- Zoner ----
+function hrZones(lthr, maxhr) { return [0.85, 0.89, 0.94, 0.99, 1.02, 1.06].map(f => Math.round(lthr * f)).concat([maxhr]); }
+
+// ---- Intervals.icu -> Zone-evidens (ren logik) ----
+function bestWindow(vel, hr, win) { // 1 Hz-strømme; returnerer bedste gennemsnitsfart og HR over win sek.
+  if (!vel || vel.length < win) return null;
+  let s = 0, h = 0, hs = 0, best = null;
+  for (let i = 0; i < vel.length; i++) {
+    s += vel[i] || 0; if (hr) { h += hr[i] || 0; }
+    if (i >= win) { s -= vel[i - win] || 0; if (hr) h -= hr[i - win] || 0; }
+    if (i >= win - 1 && (!best || s > best.sum)) best = { sum: s, hsum: h };
+  }
+  return best && { speed: best.sum / win, hr: hr ? best.hsum / win : null };
+}
+function proposeZones(cur, ev) {
+  const out = []; const why = [];
+  let thr = cur.thr, lthr = cur.lthr, maxhr = cur.maxhr;
+  if (ev.obsMaxHr && ev.obsMaxHr >= maxhr + 2) { maxhr = ev.obsMaxHr; why.push(`Observeret maxpuls ${ev.obsMaxHr} > indstillet ${cur.maxhr}`); }
+  const cands = [];
+  if (ev.raceThr) cands.push([ev.raceThr, 'løbsresultat']);
+  if (ev.w20 && ev.w20.hr && ev.w20.hr >= 0.92 * maxhr) cands.push([1000 / (ev.w20.speed * 0.96), 'bedste 20 min (hård indsats)']);
+  if (cands.length) {
+    const [best, src] = cands.sort((a, b) => a[0] - b[0])[0];
+    if (best < thr * 0.98) { thr = best; why.push(`Tærskelpace ${mmss(cur.thr)} → ${mmss(best)}/km (kilde: ${src})`); }
+  }
+  if (ev.w20 && ev.w20.hr && ev.w20.hr >= 0.92 * maxhr) {
+    const l = Math.round(ev.w20.hr * 0.97);
+    if (Math.abs(l - lthr) >= 3 && l > lthr) { lthr = l; why.push(`LTHR ${cur.lthr} → ${l} (97% af gns. puls i bedste 20 min)`); }
+  }
+  return { thr, lthr, maxhr, changed: thr !== cur.thr || lthr !== cur.lthr || maxhr !== cur.maxhr, why, zones: hrZones(lthr, maxhr) };
+}
+if (typeof module !== 'undefined') module.exports = { buildPlan, parsePace, parseTime, thrFromRace, hrZones, proposeZones, bestWindow, ymd, parseD, addD, mmss, fmtTime };
+
+// ===== KOST-MOTOR (ren logik) =====
+const QUAL = /Interval|Tærskel|Fartlek|Løbstempo|Tempo|Skarphed/;
+const bmrOf = n => 10 * n.weightKg + 6.25 * n.heightCm - 5 * n.age + (n.sex === 'k' ? -161 : 5); // Mifflin-St Jeor
+const bmiOf = (kg, cm) => kg / Math.pow(cm / 100, 2);
+
+// Seneste vægt (7-dages gennemsnit hvis muligt)
+function latestWeight(weights, fallback) {
+  if (!weights || !weights.length) return fallback;
+  const w = [...weights].sort((a, b) => a.date.localeCompare(b.date)), last = parseD(w[w.length - 1].date);
+  const recent = w.filter(x => (last - parseD(x.date)) / DAY < 7);
+  return recent.reduce((a, x) => a + x.kg, 0) / recent.length;
+}
+// Ugentlig trend: gns. seneste 7 dage minus gns. 7 dage før (kg/uge). null hvis for få målinger
+function weightTrend(weights) {
+  const w = [...weights].sort((a, b) => a.date.localeCompare(b.date)); if (w.length < 4) return null;
+  const end = parseD(w[w.length - 1].date), avg = (lo, hi) => { const xs = w.filter(x => { const dd = (end - parseD(x.date)) / DAY; return dd >= lo && dd < hi; }); return xs.length >= 2 ? xs.reduce((a, x) => a + x.kg, 0) / xs.length : null; };
+  const a = avg(0, 7), b = avg(7, 14);
+  return { current: a, previous: b, perWeek: a != null && b != null ? a - b : null };
+}
+// Glidende 7-dages gennemsnit pr. måling (til graf)
+function movingAvg(weights) {
+  const w = [...weights].sort((a, b) => a.date.localeCompare(b.date));
+  return w.map(x => { const xs = w.filter(y => { const d = (parseD(x.date) - parseD(y.date)) / DAY; return d >= 0 && d < 7; }); return { date: x.date, kg: xs.reduce((a, y) => a + y.kg, 0) / xs.length }; });
+}
+
+// Dagens mål: energi + makroer ud fra planlagte pas, styrke og vægtmål (med sikkerhedsgrænser)
+function dayTargets(N, plan, dateStr, weights) {
+  const kg = latestWeight(weights, N.weightKg), d = parseD(dateStr), bmr = bmrOf({ ...N, weightKg: kg });
+  const ws = plan ? plan.workouts.filter(x => x.date === dateStr) : [];
+  const km = ws.reduce((a, x) => a + x.km, 0);
+  const kind = ws.some(x => x.cat.startsWith('RACE')) ? 'race' : ws.some(x => x.name.startsWith('Langtur')) ? 'long' : ws.some(x => QUAL.test(x.name)) ? 'quality' : ws.length ? 'easy' : 'rest';
+  const strength = (N.strengthDays || []).includes(d.getDay());
+  const tdee = bmr * 1.35 + km * kg * 1.0 + (strength ? 300 : 0);
+  // vægtmål – kun når det er forsvarligt
+  let adj = 0, why = '';
+  const wk = plan ? plan.weeks.find(w => w.monday === ymd(mondayOf(d))) : null, A = plan && plan.A;
+  const weeksToA = A ? (parseD(A.date) - d) / (7 * DAY) : 99;
+  const goalKg = N.goalWeightKg || 0;
+  if (N.goal === 'lose') {
+    const goalBmi = goalKg ? bmiOf(goalKg, N.heightCm) : bmiOf(kg, N.heightCm);
+    if (goalKg && kg <= goalKg + 0.2) why = 'Målvægt nået – vedligehold.';
+    else if (goalBmi < 20) why = 'Målvægten giver BMI under 20 – appen planlægger ikke vægttab mod den. Ret målvægt eller vælg vedligehold.';
+    else if (weeksToA < 6 || (wk && /Specifik|Nedtrapning|Løbsuge/.test(wk.phase))) why = 'Ingen kalorieunderskud tæt på A-løbet (de sidste ~6 uger) – løbsformen prioriteres.';
+    else { const perWeek = Math.min(N.rateKgWk || 0.3, 0.005 * kg); adj = -Math.min(perWeek * 7700 / 7, tdee * 0.2); why = `Underskud ca. ${Math.round(-adj)} kcal/dag (≈${perWeek.toFixed(2)} kg/uge, maks 0,5% af kropsvægt).`; }
+  } else if (N.goal === 'gain') { adj = Math.min((N.rateKgWk || 0.25) * 7700 / 7, tdee * 0.15); why = `Overskud ca. ${Math.round(adj)} kcal/dag.`; }
+  adj += N.kcalOffset || 0;
+  let kcal = tdee + adj;
+  const floor = Math.max(bmr * 1.1, N.sex === 'k' ? 1300 : 1500);
+  if (kcal < floor) { kcal = floor; why += ' (løftet til sikkert minimum)'; }
+  // makroer
+  const P = 1.8 * kg; let cpk = kind === 'rest' ? 4 : Math.min(7.5, 4.5 + 0.1 * km);
+  let eve = false;
+  if (A) { const toA = Math.round((parseD(A.date) - d) / DAY); if (toA >= 1 && toA <= 2 && A.distKm >= 15) { cpk = A.distKm >= 35 ? 9 : 7; eve = true; kcal = Math.max(kcal, tdee); why = 'Fyldning af kulhydratdepoter før løbet.'; } if (toA === 0) { kcal = Math.max(kcal, tdee); cpk = 4; why = 'Løbsdag: let, kendt morgenmad 2-3 t før; kulhydrat under løbet efter plan.'; } }
+  let C = cpk * kg, F = (kcal - 4 * P - 4 * C) / 9;
+  if (F < 0.8 * kg) { F = 0.8 * kg; C = Math.max(3 * kg, (kcal - 4 * P - 9 * F) / 4); kcal = Math.max(kcal, 4 * P + 4 * C + 9 * F); }
+  else if (F > 1.6 * kg) { C += (F - 1.6 * kg) * 9 / 4; F = 1.6 * kg; } // overskud -> kulhydrat frem for fedt
+  return { date: dateStr, kind, km: Math.round(km * 10) / 10, strength, eve, tdee: Math.round(tdee), kcal: Math.round(kcal), p: Math.round(P), c: Math.round(C), f: Math.round(F), why: why.trim() };
+}
+
+// Ugentligt forslag til justering ud fra vægttrend
+function weeklyReview(N, weights, plan) {
+  const t = weightTrend(weights); if (!t || t.perWeek == null) return { text: 'For få vejninger til en trend endnu (brug mindst 2 pr. uge i 2 uger).', delta: 0 };
+  const w = t.perWeek, goal = N.goal || 'maintain', rate = N.rateKgWk || 0.3;
+  let delta = 0, text = `Trend seneste uge: ${w >= 0 ? '+' : ''}${w.toFixed(2)} kg.`;
+  if (goal === 'lose') { if (w < -(rate * 1.5 + 0.15)) { delta = 150; text += ' Du taber hurtigere end planlagt – øg ca. 150 kcal/dag for at beskytte træningen.'; } else if (w > -rate * 0.4) { delta = -100; text += ' Tab er langsommere end planlagt – sænk evt. ca. 100 kcal/dag (kun i opbygningsfasen).'; } else text += ' På sporet.'; }
+  else if (goal === 'maintain') { if (w > 0.3) { delta = -100; text += ' Vægten stiger – sænk ca. 100 kcal/dag.'; } else if (w < -0.3) { delta = 100; text += ' Vægten falder – øg ca. 100 kcal/dag.'; } else text += ' Stabil.'; }
+  else { if (w < rate * 0.4) { delta = 100; text += ' Opbygning er langsommere end planlagt – øg ca. 100 kcal/dag.'; } else if (w > rate * 1.6) { delta = -100; text += ' Op hurtigere end planlagt – sænk ca. 100 kcal/dag.'; } else text += ' På sporet.'; }
+  const next = Math.max(-300, Math.min(300, (N.kcalOffset || 0) + delta));
+  return { text, delta: next - (N.kcalOffset || 0), newOffset: next };
+}
+
+// Vejedage: 3 dage/uge, ikke dagen efter langtur/løb/tung underkrop (vand/glykogen forvrænger)
+function weighDays(P, N) {
+  const noisy = new Set([(P.longDay + 1) % 7, ...(P.lowerDays || []).map(d => (d + 1) % 7)]);
+  let c = [1, 2, 3, 4, 5, 6, 0].filter(d => !noisy.has(d)); if (c.length < 3) c = [1, 2, 3, 4, 5, 6, 0];
+  return pickRunDays(c, 3, c[0], []).sort((a, b) => (a || 7) - (b || 7));
+}
+
+// Indkøbsliste: sammenlæg ingredienser (pr. person) × antal personer
+const CATS = ['Frugt & grønt', 'Kød & fisk', 'Mejeri & æg', 'Brød & kolonial', 'Frost', 'Andet'];
+function aggregateShopping(menu, people) {
+  const map = new Map();
+  for (const day of (menu.days || [])) for (const m of (day.meals || [])) for (const it of (m.ingredients || [])) {
+    let unit = String(it.unit || '').toLowerCase().trim(), qty = Number(it.qty) || 0; const name = String(it.name || '').trim().toLowerCase(); if (!name || !(qty > 0)) continue;
+    if (unit === 'kg') { qty *= 1000; unit = 'g'; } else if (unit === 'l') { qty *= 1000; unit = 'ml'; } else if (unit === 'dl') { qty *= 100; unit = 'ml'; } else if (unit === 'cl') { qty *= 10; unit = 'ml'; }
+    const key = name + '|' + unit, cat = CATS.includes(it.category) ? it.category : 'Andet';
+    const e = map.get(key) || { key, name, unit, qty: 0, category: cat }; e.qty += qty * people; map.set(key, e);
+  }
+  return [...map.values()].sort((a, b) => CATS.indexOf(a.category) - CATS.indexOf(b.category) || a.name.localeCompare(b.name, 'da'));
+}
+function fmtQty(e) {
+  let q = e.qty, u = e.unit;
+  if (u === 'g' && q >= 1000) { q /= 1000; u = 'kg'; } else if (u === 'ml' && q >= 1000) { q /= 1000; u = 'l'; }
+  return `${Math.round(q * (u === 'kg' || u === 'l' ? 10 : 1)) / (u === 'kg' || u === 'l' ? 10 : 1)} ${u}`.trim();
+}
+// Valider en genereret madplan mod dagens mål (agenten får ikke lov at "bestå" blot ved at sige det)
+function checkMenu(menu, targetsByDate, lunchAssumed, workdays) {
+  const out = [];
+  for (const day of (menu.days || [])) {
+    const t = targetsByDate[day.date]; if (!t) continue;
+    const isWork = workdays.includes(parseD(day.date).getDay());
+    const sum = day.meals.reduce((a, m) => ({ kcal: a.kcal + (+m.kcal || 0), p: a.p + (+m.p || 0), c: a.c + (+m.c || 0), f: a.f + (+m.f || 0) }), { kcal: 0, p: 0, c: 0, f: 0 });
+    const lunch = isWork ? lunchAssumed : { kcal: 0, p: 0, c: 0, f: 0 };
+    const tot = { kcal: sum.kcal + lunch.kcal, p: sum.p + lunch.p, c: sum.c + lunch.c, f: sum.f + lunch.f };
+    const dev = (tot.kcal - t.kcal) / t.kcal, mealMacroKcal = m => 4 * (+m.p || 0) + 4 * (+m.c || 0) + 9 * (+m.f || 0);
+    const inconsistent = day.meals.filter(m => (+m.kcal) > 0 && Math.abs(mealMacroKcal(m) - m.kcal) / m.kcal > 0.25).map(m => m.name);
+    const hasLunchWork = isWork && day.meals.some(m => /frokost/i.test(m.slot || ''));
+    out.push({ date: day.date, kcal: Math.round(tot.kcal), target: t.kcal, dev, p: Math.round(tot.p), c: Math.round(tot.c), f: Math.round(tot.f), flag: Math.abs(dev) > 0.08 || hasLunchWork || inconsistent.length > 0, hasLunchWork, inconsistent });
+  }
+  return out;
+}
+
+// .ics med gentagende vejepåmindelser (floating tid)
+function weighIcs(days) {
+  const BY = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'], t = new Date(), first = ymd(addD(t, 1)).replace(/-/g, '');
+  return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Lobecoach//DA', 'BEGIN:VEVENT', `UID:lc-weigh-${Date.now()}@lobecoach`, `DTSTAMP:${first}T060000`, `DTSTART:${first}T070000`, 'DTEND:' + first + 'T071000',
+    'RRULE:FREQ=WEEKLY;BYDAY=' + days.map(d => BY[d]).join(','), 'SUMMARY:Vej dig (morgen, efter toilet, før mad)', 'DESCRIPTION:Samme tid og forhold hver gang. Log i Løbecoach.', 'BEGIN:VALARM', 'TRIGGER:-PT0M', 'ACTION:DISPLAY', 'DESCRIPTION:Vej dig', 'END:VALARM', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+}
+if (typeof module !== 'undefined') module.exports = { bmrOf, dayTargets, weeklyReview, weighDays, aggregateShopping, fmtQty, checkMenu, weightTrend, movingAvg, weighIcs, latestWeight };
+
+// ===== HELBREDSDATA: Garmin-vægt, Apple Sundhed, Intervals.icu wellness (ren logik) =====
+// Kilder rangeret efter pålidelighed ved samme dato: egen indtastning > Garmin-fil > Intervals.icu > Apple-eksport
+const SRC_PRI = { manuel: 4, 'garmin-csv': 3, intervals: 2, 'apple-export': 1 };
+const SRC_NAME = { manuel: 'manuel', 'garmin-csv': 'Garmin-fil', intervals: 'Intervals.icu', 'apple-export': 'Apple Sundhed' };
+const pri = s => SRC_PRI[s || 'manuel'] || 0;
+
+// Én vægt pr. dato; den bedste kilde vinder, ved lige kilde vinder den nyeste. Returnerer ny liste (sorteret).
+function mergeWeight(list, e) {
+  if (!(e.kg >= 30 && e.kg <= 250) || !e.date) return list;
+  const i = list.findIndex(w => w.date === e.date), out = [...list];
+  if (i < 0) out.push({ date: e.date, kg: Math.round(e.kg * 10) / 10, src: e.src || 'manuel', ...(e.fat ? { fat: e.fat } : {}) });
+  else if (pri(e.src) >= pri(list[i].src)) out[i] = { ...list[i], date: e.date, kg: Math.round(e.kg * 10) / 10, src: e.src || 'manuel', ...(e.fat ? { fat: e.fat } : {}) };
+  return out.sort((a, b) => a.date.localeCompare(b.date));
+}
+// Sæt et sundhedsfelt (H[dato][felt]) med kilde-prioritet (H[dato]._s[felt] = kilde)
+function setHealth(H, date, field, v, src) {
+  if (typeof v !== 'number' || !isFinite(v) || !date) return false;
+  const d = H[date] = H[date] || { _s: {} }; d._s = d._s || {};
+  if (d[field] !== undefined && pri(src) < pri(d._s[field])) return false;
+  d[field] = Math.round(v * 100) / 100; d._s[field] = src; return true;
+}
+
+// ---------- Garmin Connect CSV (vægt/kropssammensætning) ----------
+const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, maj: 5, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, okt: 10, oct: 10, nov: 11, dec: 12 };
+function parseDateFlex(raw) {
+  const s = String(raw || '').trim(); let m, y, mo, d;
+  if ((m = s.match(/^(\d{4})-(\d{2})-(\d{2})/))) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else if ((m = s.match(/^(\d{1,2})[.\-\/]\s*(\d{1,2})[.\-\/]\s*(\d{4})/))) { d = +m[1]; mo = +m[2]; y = +m[3]; if (mo > 12 && d <= 12) { [d, mo] = [mo, d]; } } // dag-først (dansk); skifter hvis åbenlyst måned-først
+  else if ((m = s.match(/^(\d{1,2})\.?\s+([A-Za-zæøåÆØÅ]+)\.?,?\s+(\d{4})/))) { d = +m[1]; mo = MONTHS[m[2].slice(0, 4).toLowerCase()] || MONTHS[m[2].slice(0, 3).toLowerCase()]; y = +m[3]; }
+  else if ((m = s.match(/^([A-Za-zæøåÆØÅ]+)\.?\s+(\d{1,2}),?\s+(\d{4})/))) { mo = MONTHS[m[1].slice(0, 4).toLowerCase()] || MONTHS[m[1].slice(0, 3).toLowerCase()]; d = +m[2]; y = +m[3]; }
+  if (!y || !mo || !d || mo > 12 || d > 31) return null;
+  const dt = new Date(y, mo - 1, d, 12); return dt.getMonth() === mo - 1 ? ymd(dt) : null;
+}
+function splitCsvLine(line, delim) {
+  const out = []; let cur = '', q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) { if (ch === '"') { if (line[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if (ch === '"') q = true; else if (ch === delim) { out.push(cur); cur = ''; } else cur += ch;
+  }
+  out.push(cur); return out.map(s => s.trim());
+}
+const normH = s => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zæøå0-9% ]/g, ' ').replace(/\s+/g, ' ').trim();
+const numOf = raw => { let s = String(raw || '').replace(/[^\d,.\-]/g, ''); if (!s) return null; if (s.includes(',') && s.includes('.')) s = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, ''); else s = s.replace(',', '.'); const v = parseFloat(s); return isFinite(v) ? v : null; };
+const COLS = {
+  date: ['date', 'dato', 'datum', 'timestamp', 'tidspunkt', 'dato og tid'],
+  weight: ['weight', 'vaegt', 'vægt', 'kropsvaegt', 'kropsvægt', 'body weight'],
+  fat: ['body fat', 'kropsfedt', 'fedtprocent', 'fedt', 'body fat percentage'],
+  muscle: ['skeletal muscle mass', 'muscle mass', 'muskelmasse', 'skeletmuskelmasse'],
+  bone: ['bone mass', 'knoglemasse'],
+  water: ['body water', 'kropsvand', 'vand', 'vandprocent']
+};
+function parseGarminCsv(text) {
+  const lines = String(text).replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim()); if (lines.length < 2) throw new Error('Filen ser tom ud.');
+  const delim = [',', ';', '\t'].map(d => [d, (lines[0].match(new RegExp(d === '\t' ? '\t' : '\\' + d, 'g')) || []).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const head = splitCsvLine(lines[0], delim), nh = head.map(normH), map = {};
+  for (const [k, aliases] of Object.entries(COLS)) { const i = nh.findIndex(h => aliases.some(a => h === a || h.startsWith(a + ' ') || (k !== 'date' && h.startsWith(a)))); if (i >= 0) map[k] = i; }
+  if (map.date === undefined || map.weight === undefined) throw new Error('Kunne ikke genkende kolonnerne Dato og Vægt. Kolonner i filen: ' + head.join(', '));
+  const perDay = {};
+  for (const ln of lines.slice(1)) {
+    const c = splitCsvLine(ln, delim), date = parseDateFlex(c[map.date]); if (!date) continue;
+    let kg = numOf(c[map.weight]); if (kg == null) continue; if (/lb|pund/i.test(c[map.weight] + head[map.weight])) kg *= 0.45359237;
+    const row = { kg, fat: map.fat !== undefined ? numOf(c[map.fat]) : null, muscleKg: map.muscle !== undefined && !/%/.test(head[map.muscle]) ? numOf(c[map.muscle]) : null, boneKg: map.bone !== undefined ? numOf(c[map.bone]) : null, waterPct: map.water !== undefined ? numOf(c[map.water]) : null };
+    (perDay[date] = perDay[date] || []).push(row);
+  }
+  const days = {}, avg = (rows, k) => { const xs = rows.map(r => r[k]).filter(v => v != null && v > 0); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; };
+  for (const [date, rows] of Object.entries(perDay)) days[date] = { kg: avg(rows, 'kg'), fat: avg(rows, 'fat'), muscleKg: avg(rows, 'muscleKg'), boneKg: avg(rows, 'boneKg'), waterPct: avg(rows, 'waterPct'), n: rows.length };
+  const dates = Object.keys(days).sort();
+  if (!dates.length) throw new Error('Fandt ingen gyldige målinger i filen.');
+  return { days, count: dates.length, from: dates[0], to: dates[dates.length - 1], columns: Object.keys(map).filter(k => k !== 'date'), unmapped: head.filter((_, i) => !Object.values(map).includes(i)) };
+}
+
+// ---------- Apple Sundhed-eksport (zip eller export.xml), streamet ----------
+async function zipEntryStream(file, nameRe) {
+  const size = file.size, tailLen = Math.min(size, 66000), tail = new Uint8Array(await file.slice(size - tailLen, size).arrayBuffer());
+  let e = -1; for (let i = tail.length - 22; i >= 0; i--) if (tail[i] === 0x50 && tail[i + 1] === 0x4b && tail[i + 2] === 5 && tail[i + 3] === 6) { e = i; break; }
+  if (e < 0) throw new Error('Det ser ikke ud til at være en gyldig zip-fil.');
+  const dv = new DataView(tail.buffer, tail.byteOffset), n = dv.getUint16(e + 10, true), cdSize = dv.getUint32(e + 12, true), cdOff = dv.getUint32(e + 16, true);
+  if (cdOff === 0xffffffff || n === 0xffff) throw new Error('Zip-filen er for stor til at læse direkte (Zip64). Pak eksporten ud på en computer og vælg filen export.xml i stedet.');
+  const cd = new Uint8Array(await file.slice(cdOff, cdOff + cdSize).arrayBuffer()), cv = new DataView(cd.buffer, cd.byteOffset);
+  let p = 0, hit = null;
+  for (let k = 0; k < n; k++) {
+    if (cv.getUint32(p, true) !== 0x02014b50) break;
+    const method = cv.getUint16(p + 10, true), csize = cv.getUint32(p + 20, true), nlen = cv.getUint16(p + 28, true), xlen = cv.getUint16(p + 30, true), clen = cv.getUint16(p + 32, true), lho = cv.getUint32(p + 42, true);
+    const name = new TextDecoder().decode(cd.subarray(p + 46, p + 46 + nlen));
+    if (nameRe.test(name) && !/cda/i.test(name)) { hit = { method, csize, lho, name }; break; }
+    p += 46 + nlen + xlen + clen;
+  }
+  if (!hit) throw new Error('Fandt ikke export.xml i zip-filen. Er det en Apple Sundhed-eksport?');
+  const lh = new DataView(await file.slice(hit.lho, hit.lho + 30).arrayBuffer()), start = hit.lho + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+  let s = file.slice(start, start + hit.csize).stream();
+  if (hit.method === 8) s = s.pipeThrough(new DecompressionStream('deflate-raw')); else if (hit.method !== 0) throw new Error('Ukendt zip-komprimering.');
+  return s;
+}
+const T_ = { weight: 'HKQuantityTypeIdentifierBodyMass', fat: 'HKQuantityTypeIdentifierBodyFatPercentage', lean: 'HKQuantityTypeIdentifierLeanBodyMass', rhr: 'HKQuantityTypeIdentifierRestingHeartRate', hrv: 'HKQuantityTypeIdentifierHeartRateVariabilitySDNN', steps: 'HKQuantityTypeIdentifierStepCount', sleep: 'HKCategoryTypeIdentifierSleepAnalysis' };
+const appleMs = s => { const m = String(s).match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) ([+-])(\d{2})(\d{2})$/); return m ? Date.parse(`${m[1]}T${m[2]}${m[3]}${m[4]}:${m[5]}`) : NaN; };
+
+async function parseAppleExport(file, opts = {}) {
+  const cutoff = ymd(addD(new Date(), -(opts.days || 180))), onProgress = opts.onProgress || (() => {});
+  const isZip = await file.slice(0, 4).arrayBuffer().then(b => { const u = new Uint8Array(b); return u[0] === 0x50 && u[1] === 0x4b; });
+  const stream = isZip ? await zipEntryStream(file, /(^|\/)export\.xml$/) : file.stream();
+  const reader = stream.getReader(), dec = new TextDecoder();
+  const W = {}, F = {}, L = {}, R = {}, H = {}, ST = {}, SL = {}; let buf = '', read = 0, total = 0;
+  const wanted = Object.values(T_), re = /<Record\b((?:"[^"]*"|[^>"])*)>/g;
+  const handle = a => {
+    const date = a.startDate && a.startDate.slice(0, 10); if (!date || date < cutoff) return;
+    const t = a.type; total++;
+    if (t === T_.weight) { let v = parseFloat(a.value); if (/lb/i.test(a.unit)) v *= 0.45359237; (W[date] = W[date] || []).push([a.endDate || a.startDate, v]); }
+    else if (t === T_.fat) { let v = parseFloat(a.value); if (v <= 1) v *= 100; (F[date] = F[date] || []).push([a.endDate || a.startDate, v]); }
+    else if (t === T_.lean) { let v = parseFloat(a.value); if (/lb/i.test(a.unit)) v *= 0.45359237; (L[date] = L[date] || []).push([a.endDate || a.startDate, v]); }
+    else if (t === T_.rhr) (R[date] = R[date] || []).push([a.endDate || a.startDate, parseFloat(a.value)]);
+    else if (t === T_.hrv) (H[date] = H[date] || []).push(parseFloat(a.value));
+    else if (t === T_.steps) { const o = ST[date] = ST[date] || {}; o[a.sourceName || '?'] = (o[a.sourceName || '?'] || 0) + parseFloat(a.value); } // pr. kilde: undgår dobbelttælling iPhone+Watch
+    else if (t === T_.sleep && /Asleep/.test(a.value || '')) { const e = a.endDate && a.endDate.slice(0, 10), ms = appleMs(a.endDate) - appleMs(a.startDate); if (e && ms > 0) SL[e] = (SL[e] || 0) + ms / 3600000; }
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (value) { read += value.length; buf += dec.decode(value, { stream: true }); }
+    let last = 0; re.lastIndex = 0; let m;
+    while ((m = re.exec(buf))) {
+      last = re.lastIndex; const tag = m[1];
+      if (!wanted.some(w => tag.includes(w))) continue;
+      const a = {}; tag.replace(/(\w+)="([^"]*)"/g, (_, k, v) => { a[k] = v.replace(/&quot;/g, '"').replace(/&amp;/g, '&'); return ''; }); handle(a);
+    }
+    buf = buf.length - last > 200000 ? buf.slice(-8000) : buf.slice(last); // behold evt. ufærdigt tag i slutningen
+    onProgress(read);
+    if (done) break;
+  }
+  const days = {}, lastOf = xs => xs.sort((a, b) => String(a[0]).localeCompare(String(b[0])))[xs.length - 1][1], day = d => days[d] = days[d] || {};
+  Object.entries(W).forEach(([d, xs]) => { day(d).kg = lastOf(xs); });
+  Object.entries(F).forEach(([d, xs]) => { day(d).fat = lastOf(xs); });
+  Object.entries(L).forEach(([d, xs]) => { day(d).leanKg = lastOf(xs); });
+  Object.entries(R).forEach(([d, xs]) => { day(d).restingHR = lastOf(xs); });
+  Object.entries(H).forEach(([d, xs]) => { day(d).hrvSDNN = xs.reduce((a, b) => a + b, 0) / xs.length; });
+  Object.entries(ST).forEach(([d, o]) => { day(d).steps = Math.max(...Object.values(o)); });
+  Object.entries(SL).forEach(([d, h]) => { day(d).sleepH = h; });
+  const dates = Object.keys(days).sort();
+  if (!dates.length) throw new Error('Fandt ingen relevante sundhedsdata de seneste ' + (opts.days || 180) + ' dage i eksporten.');
+  return { days, count: dates.length, from: dates[0], to: dates[dates.length - 1], records: total };
+}
+
+// ---------- Restitutionssignal (ikke diagnose – kun et fingerpeg om at tage det roligere) ----------
+function recoverySignal(H, today) {
+  const T = parseD(today), mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+  const get = (f, from, to) => { const xs = []; for (let i = from; i < to; i++) { const v = (H[ymd(addD(T, -i))] || {})[f]; if (typeof v === 'number' && isFinite(v)) xs.push(v); } return xs; };
+  const flags = [], m = {};
+  { const r = get('restingHR', 0, 3), b = get('restingHR', 3, 31); if (r.length >= 2 && b.length >= 10) { const d = mean(r) - mean(b); m.rhr = { recent: mean(r), base: mean(b), diff: d }; if (d >= 5) flags.push(`hvilepuls ${Math.round(mean(r))} (normalt ca. ${Math.round(mean(b))})`); } }
+  for (const f of ['hrv', 'hrvSDNN']) { const r = get(f, 0, 3), b = get(f, 3, 31); if (r.length >= 2 && b.length >= 10) { const ratio = mean(r) / mean(b); m.hrv = { field: f, recent: mean(r), base: mean(b), ratio }; if (ratio < 0.85) flags.push(`HRV ${Math.round(mean(r))} ms (normalt ca. ${Math.round(mean(b))})`); break; } }
+  { const r = get('sleepH', 0, 3); if (r.length >= 2) { m.sleep = { recent: mean(r) }; if (mean(r) < 6) flags.push(`søvn ${mean(r).toFixed(1)} t pr. nat de sidste dage`); } }
+  if (!Object.keys(m).length) return { level: null, flags, metrics: m, text: 'For få data til et restitutionssignal (kræver ca. 10 dages historik for hvilepuls eller HRV).' };
+  const level = Math.min(2, flags.length);
+  return { level, flags, metrics: m, text: level === 0 ? 'Restitution ser normal ud.' : `${level === 1 ? 'Let signal' : 'Tydeligt signal'} om øget belastning: ${flags.join('; ')}. Det er et fingerpeg, ikke en diagnose – overvej at gøre næste kvalitetspas til en rolig tur.` };
+}
+if (typeof module !== 'undefined') module.exports = { mergeWeight, setHealth, parseGarminCsv, parseDateFlex, parseAppleExport, zipEntryStream, recoverySignal, SRC_PRI };
+
+// ===== AGENTER + API-KLIENTER (kræver browser: fetch, localStorage) =====
+const LSK = 'lobecoach.v1';
+const DEF = {
+  profile: { weeklyKm: 30, thr: '4:35', runDays: [1, 2, 3, 4, 5, 6, 0], longDay: 0, lowerDays: [], maxHr: 190, lthr: 172, runsMode: 'auto', currentRuns: 3 },
+  nutrition: { sex: '', age: 0, heightCm: 0, weightKg: 0, goal: 'maintain', goalWeightKg: 0, rateKgWk: 0.3, lunchKcal: 650, people: 1, workdays: [1, 2, 3, 4, 5], strengthDays: [1, 3, 5], kcalOffset: 0, prefs: '' },
+  weights: [], food: [], menu: null, shopChecked: {}, health: {}, sync: { last: null, error: null }, lastBackup: null,
+  events: [], overrides: {}, plan: null, review: null, zoneResult: null, lastZoneCheck: null, autoZone: false, tab: 'plan', kostTab: 'idag',
+  keys: { athlete: '0', icu: '', anthropic: '', model: 'claude-sonnet-5-5' }
+};
+function loadState() {
+  try { const x = JSON.parse(localStorage.getItem(LSK) || 'null'); if (!x) return structuredClone(DEF);
+    return { ...structuredClone(DEF), ...x, profile: { ...DEF.profile, ...x.profile }, nutrition: { ...DEF.nutrition, ...x.nutrition }, keys: { ...DEF.keys, ...x.keys } };
+  } catch (e) { return structuredClone(DEF); }
+}
+let S = loadState();
+const save = () => { try { localStorage.setItem(LSK, JSON.stringify(S)); } catch (e) { /* privat tilstand */ } };
+
+// ---- Intervals.icu ----
+async function icuFetch(url, opt = {}) {
+  if (!S.keys.icu) throw new Error('Mangler Intervals.icu API-nøgle (Indstillinger).');
+  const r = await fetch(url, { ...opt, headers: { Authorization: 'Basic ' + btoa('API_KEY:' + S.keys.icu), 'Content-Type': 'application/json' } });
+  const t = await r.text();
+  if (!r.ok) throw new Error(`Intervals.icu ${r.status}: ${t.slice(0, 200)}`);
+  try { return t ? JSON.parse(t) : null; } catch (e) { return t; }
+}
+const icu = (path, opt) => icuFetch(`https://intervals.icu/api/v1/athlete/${S.keys.athlete || 0}${path}`, opt);
+const icuActivity = path => icuFetch(`https://intervals.icu/api/v1/activity${path}`);
+
+async function uploadPlan(plan) {
+  const last = plan.workouts[plan.workouts.length - 1].date;
+  const existing = await icu(`/events?oldest=${plan.built}&newest=${last}`);
+  const keep = new Set(plan.workouts.map(w => w.external_id));
+  const stale = (existing || []).filter(e => e.external_id && e.external_id.startsWith('lc-') && !keep.has(e.external_id));
+  for (const e of stale) await icu('/events/' + e.id, { method: 'DELETE' });
+  const body = plan.workouts.map(w => ({ category: w.cat, type: 'Run', start_date_local: w.date + 'T07:00:00', name: w.name, description: w.desc, external_id: w.external_id }));
+  const res = await icu('/events/bulk?upsert=true', { method: 'POST', body: JSON.stringify(body) });
+  return { uploaded: Array.isArray(res) ? res.length : body.length, removed: stale.length };
+}
+
+// ---- Claude ----
+async function claude(system, user, max = 2500) {
+  if (!S.keys.anthropic) throw new Error('Mangler Anthropic API-nøgle (Indstillinger).');
+  const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': S.keys.anthropic, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: S.keys.model, max_tokens: max, system, messages: [{ role: 'user', content: user }] }) });
+  const j = await r.json();
+  if (!r.ok) throw new Error((j.error && j.error.message) || ('Claude API ' + r.status));
+  const t = j.content.map(b => b.text || '').join(''), m = t.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('Agenten returnerede ikke JSON.');
+  return JSON.parse(m[0]);
+}
+
+// ===== AGENT 1: PLAN-AGENT (træningsviden) =====
+const PLAN_SYSTEM = `Du er en erfaren løbetræner og reviewer for en amatørløbers træningsplan. Du får en planoversigt (uger, faser, km) og må kun svare med JSON.
+Vurdér planen mod den bedste nuværende evidens og praksis:
+- Størstedelen (ca. 75-85%) af volumen er let/aerob; 1-2 kvalitetssessioner pr. uge (ikke flere for en amatør), aldrig to hårde dage i træk.
+- Progressiv overbelastning: ugentlig stigning på ca. 5-10% er tommelfingerregel, ikke lov. Aflastningsuge hver 3.-4. uge (ca. 20-25% lavere).
+- Langtur ca. 25-35% af ugevolumen, afhængig af distance og antal løbedage.
+- Nedtrapning: 1-3 uger afhængigt af distance, volumen ned ca. 40-60% mod løbsdagen, intensitet bevares i korte doser.
+- Styrketræning er en del af ugen; tunge underkropsdage bør ligge væk fra nøgleløb.
+- B/C-løb skal ikke ødelægge A-løbets opbygning (kort nedtrapning, ingen hård træning tæt på).
+- Vær ærlig, hvis målet er urealistisk i forhold til tilgængelig tid; foreslå et realistisk B-mål i noterne.
+Du må KUN foreslå ændringer via "week_overrides" (volume_factor 0.6-1.1, max_quality 0-2) pr. mandag (YYYY-MM-DD) fra planen. Foreslå ingen ændringer, hvis planen er fornuftig.
+Svar med JSON: {"verdict":"ok"|"adjust","summary":"2-3 sætninger på dansk","week_overrides":[{"monday":"YYYY-MM-DD","volume_factor":0.9,"max_quality":1,"reason":"..."}],"notes":["..."]}`;
+
+async function planAgentReview(plan) {
+  const payload = { i_dag: plan.built, profil: S.profile, events: S.events, realisme: plan.feas && plan.feas.text,
+    restitution: (() => { const r = recoverySignal(S.health || {}, ymd(new Date())); return { niveau: r.level, signaler: r.flags }; })(), løbepas_info: plan.runsInfo, styrketræning_dage_pr_uge: (S.nutrition.strengthDays || []).length, uger: plan.weeks.map(w => ({ mandag: w.monday, fase: w.phase, km: w.km, aflastning: !!w.cutback, løbepas: w.runs, pas: w.sessions })), advarsler: plan.warnings };
+  const out = await claude(PLAN_SYSTEM, JSON.stringify(payload));
+  const valid = new Set(plan.weeks.map(w => w.monday)), ov = [];
+  for (const o of (out.week_overrides || [])) {
+    if (!valid.has(o.monday)) continue;
+    const f = Math.min(1.1, Math.max(0.6, Number(o.volume_factor) || 1)), q = o.max_quality === undefined ? undefined : Math.min(2, Math.max(0, Math.round(Number(o.max_quality))));
+    ov.push({ monday: o.monday, volume_factor: f, max_quality: q, reason: String(o.reason || '').slice(0, 200) });
+  }
+  return { verdict: out.verdict === 'adjust' ? 'adjust' : 'ok', summary: String(out.summary || ''), overrides: ov, notes: (out.notes || []).map(String).slice(0, 8) };
+}
+
+// ===== AGENT 2: ZONE-AGENT =====
+const ZONE_SYSTEM = `Du er en zone-agent for en løber. Du får nuværende zoneindstillinger, evidens fra de seneste ~12 ugers løb og et regelbaseret forslag. Du må KUN svare med JSON.
+Principper: Ændr kun zoner, når evidensen er stærk (løbsresultat, eller en hård 20-minutters indsats med høj puls). Tærskelpace kan kun flyttes med ca. 1-6% pr. gang. En enkelt sprint-peak er ikke maxpuls. Rolige løb og dårlige dage er IKKE evidens for lavere tærskel. Ved tvivl: "hold".
+Svar: {"verdict":"hold"|"update","threshold_pace":"m:ss","lthr":int,"max_hr":int,"rationale":"2-3 sætninger på dansk"}`;
+
+async function gatherZoneEvidence() {
+  const ss = await icu('/sport-settings');
+  const run = (ss || []).find(s => (s.types || []).includes('Run'));
+  if (!run) throw new Error('Fandt ingen løbe-indstillinger i Intervals.icu (Settings → Sport settings).');
+  const cur = { thr: run.threshold_pace ? 1000 / run.threshold_pace : parsePace(S.profile.thr), lthr: run.lthr || S.profile.lthr, maxhr: run.max_hr || S.profile.maxHr };
+  const acts = await icu(`/activities?oldest=${ymd(addD(new Date(), -84))}&newest=${ymd(new Date())}`);
+  const runs = (acts || []).filter(a => /Run/.test(a.type || '') && a.moving_time > 600);
+  const mh = runs.map(a => a.max_heartrate).filter(h => h >= 100).sort((a, b) => b - a);
+  const obsMaxHr = mh.length >= 2 ? mh[1] : (mh[0] || null); // 2. højeste: dæmper enkeltstående pulsspikes
+  const STD = [5, 10, 21.0975, 42.195]; let raceThr = null, raceSrc = null;
+  for (const a of runs.filter(a => a.race)) {
+    const km = a.distance / 1000, sd = STD.find(d => Math.abs(km - d) / d < 0.03);
+    if (!sd) continue; const t = thrFromRace(sd, a.moving_time);
+    if (!raceThr || t < raceThr) { raceThr = t; raceSrc = `${a.name || 'løb'} ${String(a.start_date_local || '').slice(0, 10)} (${sd.toFixed(1)} km, ${fmtTime(a.moving_time)})`; }
+  }
+  const hard = [...runs].filter(a => a.moving_time >= 1500).sort((a, b) => (b.average_speed || 0) - (a.average_speed || 0)).slice(0, 6);
+  let w20 = null, w20src = null, streamsFailed = 0;
+  for (const a of hard) {
+    try {
+      const st = await icuActivity(`/${a.id}/streams?types=velocity_smooth,heartrate`);
+      const get = k => Array.isArray(st) ? (st.find(s => s.type === k) || {}).data : (st && st[k]);
+      const w = bestWindow(get('velocity_smooth'), get('heartrate'), 1200);
+      if (w && (!w20 || w.speed > w20.speed)) { w20 = w; w20src = `${a.name || 'løb'} ${String(a.start_date_local || '').slice(0, 10)}`; }
+    } catch (e) { streamsFailed++; }
+  }
+  return { run, cur, ev: { obsMaxHr, raceThr, raceSrc, w20, w20src, runsAnalysed: runs.length, streamsFailed } };
+}
+
+async function zoneAgentRun() {
+  const { run, cur, ev } = await gatherZoneEvidence();
+  const det = proposeZones(cur, ev);
+  let agent = null, final = { thr: det.thr, lthr: det.lthr, maxhr: det.maxhr };
+  if (S.keys.anthropic) {
+    try {
+      const out = await claude(ZONE_SYSTEM, JSON.stringify({ nu: { tærskelpace: mmss(cur.thr), lthr: cur.lthr, maxpuls: cur.maxhr },
+        evidens: { observeret_maxpuls: ev.obsMaxHr, løbsresultat_tærskelpace: ev.raceThr && mmss(ev.raceThr), løbskilde: ev.raceSrc,
+          bedste_20min: ev.w20 && { pace: mmss(1000 / ev.w20.speed), puls: ev.w20.hr && Math.round(ev.w20.hr), kilde: ev.w20src }, løb_analyseret: ev.runsAnalysed },
+        regelbaseret_forslag: { tærskelpace: mmss(det.thr), lthr: det.lthr, maxpuls: det.maxhr, begrundelse: det.why } }), 800);
+      const t = out.threshold_pace ? parsePace(out.threshold_pace) : cur.thr;
+      const ok = out.verdict === 'update' && Math.abs(t / cur.thr - 1) <= 0.06 && Math.abs((out.lthr || cur.lthr) - cur.lthr) <= 8 && (out.max_hr || cur.maxhr) <= Math.max(ev.obsMaxHr || 0, cur.maxhr) + 3;
+      agent = { verdict: out.verdict, rationale: String(out.rationale || ''), accepted: ok };
+      if (out.verdict === 'hold') final = { thr: cur.thr, lthr: cur.lthr, maxhr: cur.maxhr };
+      else if (ok) final = { thr: t, lthr: Math.round(out.lthr || cur.lthr), maxhr: Math.round(out.max_hr || cur.maxhr) };
+    } catch (e) { agent = { error: e.message }; }
+  }
+  const changed = final.thr !== cur.thr || final.lthr !== cur.lthr || final.maxhr !== cur.maxhr;
+  return { runId: run.id, cur, ev, det, agent, final: { ...final, zones: hrZones(final.lthr, final.maxhr) }, changed, at: new Date().toISOString() };
+}
+
+async function applyZones(zr) {
+  const f = zr.final;
+  await icu('/sport-settings/' + zr.runId, { method: 'PUT', body: JSON.stringify({ threshold_pace: 1000 / f.thr, lthr: f.lthr, max_hr: f.maxhr, hr_zones: f.zones }) });
+  S.profile.thr = mmss(f.thr); S.profile.lthr = f.lthr; S.profile.maxHr = f.maxhr; save();
+}
+
+
+// ===== AGENT 3: MAD-AGENT (madplan) =====
+const MENU_SYSTEM = `Du er kostplanlægger for en motionsløber i Danmark. Du får, pr. dag, kalorie- og makromål, dagstype (løb/styrke) og om det er en arbejdsdag. Svar KUN med JSON.
+Regler:
+- Hverdage (arbejdsdage): INGEN frokost – den spises på arbejdet. Planlæg morgenmad, aftensmad og snacks (inkl. let kulhydratsnack før og/eller protein+kulhydrat efter løb/styrke, når der er træning). Weekend: morgenmad, frokost, aftensmad, snack.
+- Dagens måltider skal tilsammen ramme "måltider_skal_summere_til" (kcal ±5%, protein ±10 g). Kulhydratrige dage (lang tur, kvalitet, dagen før løb) skal være tydeligt mere kulhydratrige.
+- Hverdagsmad til en travl familie: simpelt, få ingredienser, gerne samme ingredienser på tværs af dagene så indkøbslisten bliver kort; aftensmad må gerne gentages en anden dag. Brug almindelige danske dagligvarer.
+- Respektér kostønsker/allergier. Ingredienser pr. PERSON med enhederne g, ml eller stk (ikke spsk/tsk). Kategori skal være en af: "Frugt & grønt","Kød & fisk","Mejeri & æg","Brød & kolonial","Frost","Andet".
+- kcal, p, c, f pr. måltid skal hænge sammen med ingredienserne (4·p + 4·c + 9·f ≈ kcal).
+Format: {"days":[{"date":"YYYY-MM-DD","meals":[{"slot":"morgenmad|frokost|aftensmad|snack","name":"…","kcal":0,"p":0,"c":0,"f":0,"ingredients":[{"name":"havregryn","qty":70,"unit":"g","category":"Brød & kolonial"}],"steps":"1-2 korte sætninger"}]}]}`;
+
+function lunchAssumed(N) { const k = N.lunchKcal || 650; return { kcal: k, p: Math.round(k * 0.2 / 4), c: Math.round(k * 0.5 / 4), f: Math.round(k * 0.3 / 9) }; }
+function nutritionReady(N) { return (N.sex === 'm' || N.sex === 'k') && N.age > 15 && N.heightCm > 120 && (N.weightKg > 30 || (S.weights && S.weights.length)); }
+function targetsFor(dates) {
+  const N = S.nutrition, out = {}; N.weightKg = N.weightKg || (S.weights.length ? S.weights[S.weights.length - 1].kg : 0);
+  dates.forEach(d => { out[d] = dayTargets(N, S.plan, d, S.weights); });
+  return out;
+}
+const KIND_DA = { rest: 'hviledag', easy: 'rolig løbedag', quality: 'kvalitetsløb', long: 'langtur', race: 'løbsdag' };
+
+async function menuChunk(dates, targets, feedback) {
+  const N = S.nutrition, L = lunchAssumed(N);
+  const days = dates.map(d => {
+    const t = targets[d], work = (N.workdays || []).includes(parseD(d).getDay());
+    const m = work ? { kcal: t.kcal - L.kcal, p: t.p - L.p, c: t.c - L.c, f: t.f - L.f } : { kcal: t.kcal, p: t.p, c: t.c, f: t.f };
+    return { date: d, ugedag: DOW[parseD(d).getDay()], arbejdsdag: work, dagstype: KIND_DA[t.kind], løb_km: t.km, styrketræning: t.strength, dag_før_løb: t.eve, måltider_skal_summere_til: m, note: t.why || undefined };
+  });
+  const payload = { personer: N.people || 1, kostønsker_allergier: N.prefs || 'ingen', dage: days, ...(feedback ? { ret_følgende: feedback } : {}) };
+  const out = await claude(MENU_SYSTEM, JSON.stringify(payload), 9000);
+  return (out.days || []).filter(d => dates.includes(d.date));
+}
+function cleanMenuDays(days) {
+  const N = S.nutrition;
+  return days.map(d => {
+    const work = (N.workdays || []).includes(parseD(d.date).getDay());
+    const meals = (d.meals || []).filter(m => !(work && /frokost/i.test(m.slot || ''))).map(m => ({
+      slot: String(m.slot || 'snack'), name: String(m.name || '').slice(0, 80), kcal: Math.round(+m.kcal || 0), p: Math.round(+m.p || 0), c: Math.round(+m.c || 0), f: Math.round(+m.f || 0),
+      steps: String(m.steps || '').slice(0, 300),
+      ingredients: (m.ingredients || []).map(i => ({ name: String(i.name || '').slice(0, 40), qty: +i.qty || 0, unit: String(i.unit || 'g'), category: i.category })).filter(i => i.name && i.qty > 0) }));
+    return { date: d.date, meals };
+  });
+}
+async function generateMenu(startDate) {
+  const N = S.nutrition; if (!nutritionReady(N)) throw new Error('Udfyld kost-profilen under Indstillinger først.');
+  if (!S.keys.anthropic) throw new Error('Mangler Anthropic API-nøgle (Indstillinger).');
+  const dates = Array.from({ length: 7 }, (_, i) => ymd(addD(parseD(startDate), i)));
+  const targets = targetsFor(dates);
+  let days = [];
+  for (const chunk of [dates.slice(0, 3), dates.slice(3)]) days.push(...cleanMenuDays(await menuChunk(chunk, targets)));
+  const L = lunchAssumed(N), run = () => checkMenu({ days }, targets, L, N.workdays || []);
+  let check = run();
+  const bad = check.filter(c => c.flag);
+  if (bad.length) { // én reparationsrunde med konkret feedback
+    const fb = bad.map(b => ({ date: b.date, problem: [Math.abs(b.dev) > 0.08 ? `Dagen summerer til ${b.kcal} kcal inkl. evt. frokost, men målet er ${b.target} (afvigelse ${Math.round(b.dev * 100)}%)` : null, b.inconsistent.length ? 'kcal passer ikke til makroerne i: ' + b.inconsistent.join(', ') : null].filter(Boolean) }));
+    try { const fixed = cleanMenuDays(await menuChunk(bad.map(b => b.date), targets, fb)); days = days.map(d => fixed.find(f => f.date === d.date) || d); check = run(); } catch (e) { /* behold første udkast */ }
+  }
+  S.menu = { start: startDate, created: new Date().toISOString(), days, check, targets: Object.fromEntries(dates.map(d => [d, { kcal: targets[d].kcal, p: targets[d].p, c: targets[d].c, f: targets[d].f, kind: targets[d].kind }])) };
+  S.shopChecked = {};
+}
+
+// ===== AGENT 4: FOTO-AGENT (kaloriescan) =====
+const FOOD_SYSTEM = `Du estimerer kalorier og makroer for et måltid ud fra et foto. Svar KUN med JSON.
+Identificér hver komponent, estimér vægt i gram ud fra tallerkenstørrelse (standard ~26 cm) og kendte genstande, og beregn kcal, protein, kulhydrat og fedt. Medregn synligt fedt/dressing/sovs med rimelighed, men antag ikke skjulte ting uden grund. Vær ærlig om usikkerhed: confidence "lav" hvis portionsstørrelsen er svær at se. Hvis billedet ikke viser mad, så sæt items til [].
+Format: {"name":"kort navn på måltidet","items":[{"name":"…","grams":0,"kcal":0,"p":0,"c":0,"f":0}],"confidence":"lav|middel|høj","notes":"1-2 sætninger på dansk, fx hvad der er mest usikkert"}`;
+async function foodPhotoAgent(b64, mediaType, hint) {
+  const out = await claude(FOOD_SYSTEM, [{ type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: b64 } },
+    { type: 'text', text: hint ? 'Tilføjelse fra brugeren: ' + hint : 'Estimér måltidet.' }], 1200);
+  const items = (out.items || []).map(i => ({ name: String(i.name || ''), grams: Math.round(+i.grams || 0), kcal: Math.round(+i.kcal || 0), p: Math.round(+i.p || 0), c: Math.round(+i.c || 0), f: Math.round(+i.f || 0) }));
+  const sum = k => items.reduce((a, i) => a + i[k], 0);
+  return { name: String(out.name || (items[0] && items[0].name) || 'Måltid').slice(0, 80), items, kcal: sum('kcal'), p: sum('p'), c: sum('c'), f: sum('f'), confidence: ['lav', 'middel', 'høj'].includes(out.confidence) ? out.confidence : 'lav', notes: String(out.notes || '').slice(0, 300) };
+}
+
+
+// ===== SYNK: Intervals.icu wellness (Garmin Connect -> Intervals.icu -> her) =====
+async function syncIntervalsWellness(days = 90) {
+  const rows = await icu(`/wellness?oldest=${ymd(addD(new Date(), -days))}&newest=${ymd(new Date())}`);
+  let w = 0, h = 0;
+  for (const r of (Array.isArray(rows) ? rows : [])) {
+    const date = r.id || r.date; if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    if (r.weight > 0) { S.weights = mergeWeight(S.weights, { date, kg: +r.weight, fat: r.bodyFat > 0 ? +r.bodyFat : undefined, src: 'intervals' }); w++; }
+    if (r.bodyFat > 0) h += setHealth(S.health, date, 'fat', +r.bodyFat, 'intervals') ? 1 : 0;
+    const f = [['restingHR', r.restingHR], ['hrv', r.hrv], ['hrvSDNN', r.hrvSDNN], ['sleepH', r.sleepSecs > 0 ? r.sleepSecs / 3600 : null], ['steps', r.steps]];
+    for (const [k, v] of f) if (typeof v === 'number' && v > 0) h += setHealth(S.health, date, k, v, 'intervals') ? 1 : 0;
+  }
+  S.sync = { last: new Date().toISOString(), error: null, rows: Array.isArray(rows) ? rows.length : 0 };
+  return { rows: S.sync.rows, weights: w, fields: h };
+}
+
+// Anvend en bekræftet filimport (Garmin CSV / Apple-eksport)
+function applyImport(p) {
+  let w = 0, h = 0; const src = p.kind === 'garmin' ? 'garmin-csv' : 'apple-export';
+  for (const [date, d] of Object.entries(p.days)) {
+    if (d.kg > 0) { S.weights = mergeWeight(S.weights, { date, kg: d.kg, fat: d.fat > 0 ? d.fat : undefined, src }); w++; }
+    for (const k of ['fat', 'muscleKg', 'boneKg', 'waterPct', 'leanKg', 'restingHR', 'hrvSDNN', 'steps', 'sleepH']) if (d[k] > 0) h += setHealth(S.health, date, k, d[k], src) ? 1 : 0;
+  }
+  // hold historikken begrænset (vægt: 1 år, øvrige felter: 180 dage)
+  const cut = ymd(addD(new Date(), -180)); Object.keys(S.health).forEach(k => { if (k < cut) delete S.health[k]; });
+  S.weights = S.weights.filter(x => x.date >= ymd(addD(new Date(), -365)));
+  return { weights: w, fields: h };
+}
+
+// ===== UI =====
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let busy = '', msg = null, draft = null, pending = null, showAuth = false; // msg: {kind:'ok'|'err', text}; draft: madlog-kladde (foto/manuel)
+const MON_FIRST = [1, 2, 3, 4, 5, 6, 0];
+const todayStr = () => ymd(new Date());
+const note = (kind, text) => { msg = { kind, text }; render(); };
+async function run(label, fn) {
+  busy = label; msg = null; render();
+  try { await fn(); } catch (e) { msg = { kind: 'err', text: e.message || String(e) }; }
+  busy = ''; save(); render();
+}
+function rebuild() {
+  S.plan = buildPlan(S, addD(new Date(), 1));
+  if (S.plan.error) { const e = S.plan.error; S.plan = null; throw new Error(e); }
+}
+const dayChecks = (name, arr) => MON_FIRST.map(d => `<label class="chk"><input type="checkbox" name="${name}" value="${d}" ${arr.includes(d) ? 'checked' : ''}> ${DOW[d]}</label>`).join(' ');
+
+// ---------- BACKUP ----------
+const BACKUP_KEYS = ['profile', 'nutrition', 'weights', 'food', 'menu', 'shopChecked', 'health', 'events', 'overrides', 'autoZone', 'lastZoneCheck'];
+function makeBackup(withKeys) {
+  const data = {}; BACKUP_KEYS.forEach(k => { data[k] = S[k]; }); if (withKeys) data.keys = S.keys;
+  return JSON.stringify({ app: 'lobecoach', version: 1, exported: new Date().toISOString(), data });
+}
+function restoreBackup(text) {
+  let j; try { j = JSON.parse(text); } catch (e) { throw new Error('Filen er ikke en gyldig backup (kan ikke læses).'); }
+  if (!j || j.app !== 'lobecoach' || !j.data || typeof j.data !== 'object') throw new Error('Det er ikke en Løbecoach-backup.');
+  const d = j.data, isObj = v => v && typeof v === 'object' && !Array.isArray(v);
+  for (const k of ['weights', 'food', 'events']) if (k in d && !Array.isArray(d[k])) throw new Error(`Backuppen er beskadiget (${k}).`);
+  for (const k of ['profile', 'nutrition', 'health', 'overrides', 'shopChecked']) if (k in d && !isObj(d[k])) throw new Error(`Backuppen er beskadiget (${k}).`);
+  if ('weights' in d) d.weights = d.weights.filter(w => w && /^\d{4}-\d{2}-\d{2}$/.test(w.date) && w.kg >= 30 && w.kg <= 250);
+  for (const k of BACKUP_KEYS) if (k in d) S[k] = (k === 'profile' || k === 'nutrition') ? { ...DEF[k], ...d[k] } : d[k];
+  if (isObj(d.keys)) S.keys = { ...S.keys, ...d.keys };
+  S.plan = null; S.review = null; S.zoneResult = null; draft = null; pending = null;
+  try { rebuild(); } catch (e) { /* ingen A-event endnu */ }
+  return { weights: S.weights.length, food: S.food.length, events: S.events.length };
+}
+const backupDue = () => (S.weights.length || S.food.length || Object.keys(S.health || {}).length) && (!S.lastBackup || Date.now() - new Date(S.lastBackup) > 14 * DAY);
+
+// ---------- PLAN ----------
+function viewPlan() {
+  const p = S.plan, P = S.profile;
+  let h = `<div class="row"><button data-act="gen" class="pri">${p ? 'Genopbyg plan' : 'Byg plan'}</button>
+    <button data-act="review" ${p ? '' : 'disabled'}>Plan-agent: gennemgå</button>
+    <button data-act="upload" ${p ? '' : 'disabled'}>Upload til Intervals.icu</button></div>`;
+  if (!p) return h + `<p class="mut">Tilføj et A-event under Events, og tryk “Byg plan”. Planen starter i morgen.</p>`;
+  const A = p.A, R = p.runsInfo, avail = P.runDays.length;
+  h += `<div class="card"><b>${esc(A.name)}</b> · ${esc(A.date)} · ${A.distKm} km${A.goal ? ' · mål ' + esc(A.goal) : ''}<br><span class="mut">${p.weeks.length} uger · ${p.workouts.length} pas · ${Math.round(p.weeks.reduce((a, w) => a + w.km, 0))} km i alt</span></div>`;
+  if (p.feas) h += `<div class="card ${p.feas.ok ? 'good' : 'warn'}">${esc(p.feas.text)}</div>`;
+  { const rs = recoverySignal(S.health || {}, todayStr()); if (rs.level) { const nq = S.plan.workouts.find(x => x.date >= todayStr() && x.date <= ymd(addD(new Date(), 1)) && QUAL.test(x.name)); h += `<div class="card warn"><b>Restitution</b><br>${esc(rs.text)}${nq ? '<br><b>Næste kvalitetspas: ' + esc(nq.name) + ' (' + esc(nq.date) + ') – overvej at gøre det roligt.</b>' : ''}</div>`; } }
+  h += `<div class="card"><label>Løbepas pr. uge<select data-act="runsmode"><option value="auto" ${R.mode === 'auto' ? 'selected' : ''}>Auto (anbefalet: ${R.recommended})</option>${[2, 3, 4, 5, 6].filter(n => n <= avail).map(n => `<option value="${n}" ${String(R.mode) === String(n) ? 'selected' : ''}>${n} pas</option>`).join('')}</select></label>
+    <span class="mut">Planen starter på ${R.current} pas/uge (det du løber nu) og bygger op til ${R.target}. Anbefalingen ud fra målet: ${R.recommended} pas (du skal forbedre tærsklen ca. ${R.gapPct.toFixed(1)}%).${R.target + (S.nutrition.strengthDays || []).length >= 8 ? ' Bemærk: ' + R.target + ' løbepas + ' + (S.nutrition.strengthDays || []).length + ' styrkepas er en tung uge – prioritér søvn og mad.' : ''} Ændrer du antallet, genopbygges alle fremtidige pas.</span></div>`;
+  if (p.warnings.length) h += `<div class="card warn"><b>Advarsler</b><br>${p.warnings.map(esc).join('<br>')}</div>`;
+  if (S.review) {
+    h += `<div class="card"><b>Plan-agent</b> (${S.review.verdict === 'ok' ? 'ingen ændringer' : 'foreslår ændringer'})<br>${esc(S.review.summary)}`;
+    if (S.review.overrides.length) h += `<ul>${S.review.overrides.map(o => `<li>Uge ${esc(o.monday)}: volumen ×${o.volume_factor}${o.max_quality !== undefined ? ', maks ' + o.max_quality + ' kvalitetspas' : ''} – ${esc(o.reason)}</li>`).join('')}</ul>
+      <button data-act="applyreview" class="pri">Anvend ${S.review.overrides.length} ændringer</button>`;
+    if (S.review.notes.length) h += `<ul>${S.review.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>`;
+    h += `</div>`;
+  }
+  const byWeek = {}; p.workouts.forEach(w => { const m = ymd(mondayOf(parseD(w.date))); (byWeek[m] = byWeek[m] || []).push(w); });
+  h += p.weeks.map(w => {
+    const ov = S.overrides[w.monday] || {};
+    return `<details class="wk"><summary><span class="ph">${esc(w.phase)}</span> ${esc(w.monday)} · <b>${w.km} km</b> · ${w.runs || '–'} pas${w.cutback ? ' · aflastning' : ''}${S.overrides[w.monday] ? ' · justeret' : ''}</summary>
+    <label>Løbepas denne uge<select data-act="weekruns" data-mon="${esc(w.monday)}"><option value="">Som planen</option>${[2, 3, 4, 5, 6].filter(n => n <= avail).map(n => `<option value="${n}" ${ov.runs === n ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+    ${(byWeek[w.monday] || []).map(x => `<details class="wo"><summary>${esc(DOW[parseD(x.date).getDay()])} ${esc(x.date.slice(5))} · ${esc(x.name)} · ${x.km} km</summary><pre>${esc(x.desc)}</pre></details>`).join('')}</details>`;
+  }).join('');
+  return h;
+}
+
+// ---------- EVENTS ----------
+function viewEvents() {
+  const rows = [...S.events].sort((a, b) => a.date.localeCompare(b.date)).map(e => `<div class="card ev"><div><b>${esc(e.name)}</b> <span class="pill">${esc(e.prio)}</span><br><span class="mut">${esc(e.date)} · ${e.distKm} km${e.goal ? ' · mål ' + esc(e.goal) : ''}</span></div><button data-act="delev" data-id="${e.id}">Slet</button></div>`).join('');
+  return `${rows || '<p class="mut">Ingen events endnu.</p>'}
+  <form id="evf" class="card"><h3>Tilføj event</h3>
+    <label>Navn<input name="name" required placeholder="fx Forårshalvmarathon"></label>
+    <label>Dato<input name="date" type="date" required></label>
+    <label>Distance<select name="dist"><option value="5">5 km</option><option value="10">10 km</option><option value="21.0975" selected>Halvmaraton</option><option value="42.195">Marathon</option><option value="custom">Anden…</option></select></label>
+    <label>Egen distance (km)<input name="custom" type="number" step="0.1" min="1"></label>
+    <label>Måltid (t:mm:ss eller mm:ss, valgfri)<input name="goal" placeholder="1:29:59"></label>
+    <label>Prioritet<select name="prio"><option value="A">A – hovedmål (planen bygges mod den)</option><option value="B">B – vigtigt, kort nedtrapning</option><option value="C">C – træningsløb</option></select></label>
+    <button class="pri">Tilføj og genberegn plan</button></form>`;
+}
+
+// ---------- KOST ----------
+const SLOTS = ['morgenmad', 'frokost', 'aftensmad', 'snack'];
+const macroLine = t => `${t.kcal} kcal · P ${t.p} · K ${t.c} · F ${t.f}`;
+function viewKost() {
+  const N = S.nutrition, sub = S.kostTab;
+  let h = `<nav class="sub">${[['idag', 'I dag'], ['plan', 'Madplan'], ['indkob', 'Indkøb']].map(([k, l]) => `<button data-ktab="${k}" class="${sub === k ? 'on' : ''}">${l}</button>`).join('')}</nav>`;
+  if (!nutritionReady(N)) return h + `<div class="card warn">Udfyld køn, alder, højde og vægt under <b>Indstillinger → Kost</b> (eller log en vægt under Vægt), så kan jeg regne dine dagsmål ud.</div>`;
+  N.weightKg = N.weightKg || S.weights[S.weights.length - 1].kg;
+  if (sub === 'idag') return h + kostToday();
+  if (sub === 'plan') return h + kostMenu();
+  return h + kostShop();
+}
+function kostToday() {
+  const N = S.nutrition, d = todayStr(), t = dayTargets(N, S.plan, d, S.weights), work = (N.workdays || []).includes(new Date().getDay());
+  const log = S.food.filter(f => f.date === d), sum = k => log.reduce((a, f) => a + (+f[k] || 0), 0);
+  const hasLunch = log.some(f => f.slot === 'frokost'), L = lunchAssumed(N), assumed = work && !hasLunch ? L : { kcal: 0, p: 0, c: 0, f: 0 };
+  const left = { kcal: t.kcal - sum('kcal') - assumed.kcal, p: t.p - sum('p') - assumed.p, c: t.c - sum('c') - assumed.c, f: t.f - sum('f') - assumed.f };
+  let h = `<div class="card"><b>I dag: ${esc(KIND_DA[t.kind])}${t.km ? ' (' + t.km + ' km)' : ''}${t.strength ? ' + styrke' : ''}</b><br>Mål: <b>${macroLine(t)}</b>${t.why ? '<br><span class="mut">' + esc(t.why) + '</span>' : ''}
+    ${assumed.kcal ? `<br><span class="mut">Frokost på arbejde er regnet med som ca. ${assumed.kcal} kcal (log den, hvis du vil have den præcis).</span>` : ''}</div>
+    <div class="card ${left.kcal < -150 ? 'warn' : ''}"><b>Tilbage i dag</b><br>${Math.round(left.kcal)} kcal · P ${Math.round(left.p)} · K ${Math.round(left.c)} · F ${Math.round(left.f)}<br><span class="mut">Logget: ${Math.round(sum('kcal'))} kcal</span></div>`;
+  h += `<div class="card"><h3>Log et måltid</h3>
+    <label>Tag et billede eller vælg fra galleriet<input id="photo" type="file" accept="image/*" capture="environment"></label>
+    <label>Kommentar til billedet (valgfri, fx “2 skiver rugbrød, smør på”)<input id="photohint"></label>
+    <div class="row"><button data-act="estimate" class="pri">Vurdér kalorier</button><button data-act="manual">Tilføj manuelt</button></div>
+    <span class="mut">Billedet sendes til Anthropic for vurdering og gemmes ikke. En billedvurdering er et skøn (typisk ±20–30 %); ret tallene, før du gemmer.</span></div>`;
+  if (draft) h += `<form id="draftf" class="card"><h3>${draft.src === 'foto' ? 'Vurdering (' + esc(draft.confidence) + ' sikkerhed)' : 'Nyt måltid'}</h3>
+    ${draft.items && draft.items.length ? '<ul>' + draft.items.map(i => `<li>${esc(i.name)} ~${i.grams} g · ${i.kcal} kcal</li>`).join('') + '</ul>' : ''}${draft.notes ? `<p class="mut">${esc(draft.notes)}</p>` : ''}
+    <label>Navn<input name="name" value="${esc(draft.name)}" required></label>
+    <label>Måltid<select name="slot">${SLOTS.map(s => `<option ${draft.slot === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+    <label>kcal<input name="kcal" type="number" value="${draft.kcal}" required></label>
+    <div class="trio"><label>Protein g<input name="p" type="number" value="${draft.p}"></label><label>Kulhydrat g<input name="c" type="number" value="${draft.c}"></label><label>Fedt g<input name="f" type="number" value="${draft.f}"></label></div>
+    <div class="row"><button class="pri">Gem i dagens log</button><button type="button" data-act="canceldraft">Annullér</button></div></form>`;
+  if (log.length) h += `<div class="card"><h3>Dagens log</h3>${log.map(f => `<div class="ev"><div>${esc(f.slot)} · ${esc(f.name)}<br><span class="mut">${f.kcal} kcal · P ${f.p} · K ${f.c} · F ${f.f}${f.src === 'foto' ? ' · foto' : ''}</span></div><button data-act="delfood" data-id="${f.id}">Slet</button></div>`).join('')}</div>`;
+  return h;
+}
+function kostMenu() {
+  const N = S.nutrition, M = S.menu, start = ymd(addD(new Date(), 1));
+  let h = `<div class="row"><button data-act="menu" class="pri">Lav madplan (7 dage fra ${esc(start)})</button></div>
+    <span class="mut">Hverdage planlægges uden frokost (den spiser du på arbejde). Kræver Anthropic-nøgle. Tager ca. et minut.</span>`;
+  if (!M) return h;
+  const flagged = M.check.filter(c => c.flag);
+  if (flagged.length) h += `<div class="card warn"><b>Tjek:</b> ${flagged.map(c => `${esc(c.date.slice(5))}: ${c.kcal} af ${c.target} kcal${c.hasLunchWork ? ', frokost på arbejdsdag' : ''}${c.inconsistent.length ? ', kcal/makro passer ikke' : ''}`).join(' · ')}</div>`;
+  h += M.days.map(d => {
+    const c = M.check.find(x => x.date === d.date) || {}, t = M.targets[d.date] || {}, work = (N.workdays || []).includes(parseD(d.date).getDay());
+    return `<details class="wk"><summary><b>${esc(DOW[parseD(d.date).getDay()])} ${esc(d.date.slice(5))}</b> · ${c.kcal || '?'} / ${t.kcal || '?'} kcal${c.flag ? ' ⚠' : ''}</summary>
+      ${work ? `<p class="mut">Frokost: på arbejde (ikke planlagt, regnet som ca. ${N.lunchKcal} kcal).</p>` : ''}
+      ${d.meals.map(m => `<div class="card"><b>${esc(m.slot)}: ${esc(m.name)}</b><br><span class="mut">${m.kcal} kcal · P ${m.p} · K ${m.c} · F ${m.f}</span><br>${m.ingredients.map(i => esc(i.name) + ' ' + i.qty + ' ' + esc(i.unit)).join(', ')}${m.steps ? `<br><i>${esc(m.steps)}</i>` : ''}</div>`).join('')}</details>`;
+  }).join('');
+  return h;
+}
+function kostShop() {
+  const N = S.nutrition;
+  if (!S.menu) return `<p class="mut">Lav først en madplan, så samler jeg indkøbslisten.</p>`;
+  const list = aggregateShopping(S.menu, N.people || 1);
+  let h = `<div class="row"><button data-act="copyshop">Kopiér liste</button></div><span class="mut">${N.people || 1} person(er) · ${esc(S.menu.start)} + 7 dage. Husk at tjekke, hvad du har hjemme.</span>`;
+  let cat = '';
+  list.forEach(e => {
+    if (e.category !== cat) { cat = e.category; h += `<h3>${esc(cat)}</h3>`; }
+    h += `<label class="chk shop"><input type="checkbox" data-act="shop" data-key="${esc(e.key)}" ${S.shopChecked[e.key] ? 'checked' : ''}> <span class="${S.shopChecked[e.key] ? 'done' : ''}">${esc(e.name)} – ${esc(fmtQty(e))}</span></label>`;
+  });
+  return h;
+}
+
+// ---------- VÆGT ----------
+function weightChart(ws) {
+  if (ws.length < 2) return '';
+  const w = [...ws].sort((a, b) => a.date.localeCompare(b.date)).slice(-60), ma = movingAvg(w);
+  const xs = w.map(x => parseD(x.date).getTime()), x0 = Math.min(...xs), x1 = Math.max(...xs) || x0 + 1;
+  const ys = w.map(x => x.kg).concat(ma.map(x => x.kg)), y0 = Math.min(...ys) - 0.5, y1 = Math.max(...ys) + 0.5;
+  const X = t => 10 + (x1 === x0 ? 0 : (t - x0) / (x1 - x0)) * 300, Y = v => 10 + (1 - (v - y0) / (y1 - y0)) * 110;
+  return `<svg viewBox="0 0 320 130" class="chart"><polyline fill="none" stroke="var(--line)" stroke-width="1" points="${w.map((p, i) => X(xs[i]) + ',' + Y(p.kg)).join(' ')}"/>${w.map((p, i) => `<circle cx="${X(xs[i])}" cy="${Y(p.kg)}" r="2.5" fill="var(--mut)"/>`).join('')}
+    <polyline fill="none" stroke="var(--pri)" stroke-width="2.5" points="${ma.map((p, i) => X(xs[i]) + ',' + Y(p.kg)).join(' ')}"/><text x="10" y="126" font-size="9" fill="var(--mut)">${y0.toFixed(1)}–${y1.toFixed(1)} kg · blå = 7-dages gennemsnit</text></svg>`;
+}
+function viewWeight() {
+  const N = S.nutrition, ws = [...S.weights].sort((a, b) => b.date.localeCompare(a.date)), days = weighDays(S.profile, N), tr = weightTrend(S.weights);
+  const todayW = days.includes(new Date().getDay()), has = S.weights.some(w => w.date === todayStr());
+  let h = `<form id="wf" class="card"><h3>Log vægt</h3><div class="trio"><label>Dato<input name="date" type="date" value="${todayStr()}" required></label><label>kg<input name="kg" type="number" step="0.1" min="30" max="250" required></label><label>&nbsp;<button class="pri">Gem</button></label></div></form>
+    <div class="card">${todayW && !has ? '<b>I dag er en vejedag</b> – vej dig i morges, før du spiser og drikker.<br>' : ''}<b>Vejeplan:</b> ${days.map(d => DOW[d]).join(', ')} om morgenen, efter toiletbesøg og før mad/drikke, samme vægt og samme tøj.
+      Dagene er valgt, så de ikke ligger dagen efter langtur eller tung underkropstræning (vand og glykogen giver udsving). Se på 7-dages gennemsnittet, ikke enkeltmålinger.
+      <div class="row"><button data-act="weighics">Hent kalender-påmindelse (.ics)</button></div></div>`;
+  h += weightChart(S.weights);
+  if (tr && tr.perWeek != null) {
+    const r = weeklyReview(N, S.weights, S.plan);
+    h += `<div class="card"><b>Trend</b><br>${esc(r.text)}${r.delta ? `<br><button data-act="applyoffset" class="pri" data-d="${r.newOffset}">Justér kalorier ${r.delta > 0 ? '+' : ''}${r.delta} kcal/dag</button>` : ''}${N.kcalOffset ? `<br><span class="mut">Nuværende justering: ${N.kcalOffset > 0 ? '+' : ''}${N.kcalOffset} kcal/dag</span>` : ''}</div>`;
+  } else h += `<p class="mut">${esc(weeklyReview(N, S.weights, S.plan).text)}</p>`;
+  h += ws.slice(0, 14).map(w => `<div class="ev"><div>${esc(w.date)} · <b>${w.kg} kg</b>${w.fat ? ' · ' + w.fat.toFixed(1) + ' % fedt' : ''} <span class="mut">${esc(SRC_NAME[w.src || 'manuel'])}</span></div><button data-act="delw" data-date="${esc(w.date)}">Slet</button></div>`).join('');
+  return h;
+}
+
+// ---------- HELBRED ----------
+function viewHealth() {
+  const H = S.health || {}, sy = S.sync || {};
+  let h = `<div class="card"><h3>Synkronisering</h3>
+    <div class="row"><button data-act="syncicu" class="pri">Hent fra Intervals.icu</button></div>
+    <span class="mut">${sy.last ? 'Senest: ' + esc(sy.last.slice(0, 16).replace('T', ' ')) + ' (' + (sy.rows || 0) + ' dage)' : 'Endnu ikke hentet.'}${sy.error ? ' · <b>' + esc(sy.error) + '</b>' : ''} Henter vægt, kropsfedt, hvilepuls, HRV, søvn og skridt, som Intervals.icu har modtaget fra Garmin (og evt. Apple via genvej).</span></div>
+    <div class="card"><h3>Importér fil</h3>
+    <label>Garmin Connect – vægt/kropssammensætning (.csv)<input id="garminfile" type="file" accept=".csv,text/csv,text/plain"></label><div class="row"><button data-act="readgarmin">Læs Garmin-fil</button></div>
+    <label>Apple Sundhed – eksport (.zip eller export.xml)<input id="applefile" type="file" accept=".zip,.xml,application/zip,text/xml"></label><div class="row"><button data-act="readapple">Læs Apple-eksport</button></div>
+    <span class="mut">Filerne læses lokalt i din browser og sendes ikke videre. Du ser en forhåndsvisning, før noget gemmes.</span></div>`;
+  if (pending) h += `<div class="card good"><b>${pending.kind === 'garmin' ? 'Garmin-fil' : 'Apple-eksport'} læst</b><br>${pending.count} dage (${esc(pending.from)} → ${esc(pending.to)})${pending.records ? ', ' + pending.records + ' målinger' : ''}.<br>Fundet: ${esc(pending.found)}.${pending.unmapped && pending.unmapped.length ? '<br><span class="mut">Ikke brugt: ' + esc(pending.unmapped.join(', ')) + '</span>' : ''}<br><span class="mut">Eksempel: ${esc(pending.sample)}</span>
+    <div class="row"><button data-act="confirmimport" class="pri">Importér</button><button data-act="cancelimport">Annullér</button></div></div>`;
+  // restitution
+  const rs = recoverySignal(H, todayStr());
+  h += `<div class="card ${rs.level ? 'warn' : ''}"><b>Restitution</b><br>${esc(rs.text)}</div>`;
+  // kropssammensætning: seneste værdi for hvert felt (Intervals leverer typisk kun vægt+fedt; muskel/knogle/vand kommer fra Garmin-CSV)
+  const lastOf = f => { const ds = Object.keys(H).filter(d => H[d][f] > 0).sort(), d = ds[ds.length - 1]; return d ? { d, v: H[d][f] } : null; };
+  const wl = [...S.weights].reverse().find(w => w.fat), fatH = lastOf('fat'), fatE = wl ? { d: wl.date, v: wl.fat } : null, fatL = [fatH, fatE].filter(Boolean).sort((x, y) => y.d.localeCompare(x.d))[0];
+  const mu = lastOf('muscleKg'), bo = lastOf('boneKg'), wa = lastOf('waterPct'), tag = x => x && fatL && x.d !== fatL.d ? ` <span class="mut">(${esc(x.d.slice(5))})</span>` : '';
+  if (fatL) { const w = S.weights.find(x => x.date === fatL.d) || [...S.weights].reverse()[0], kg = w && w.kg;
+    h += `<div class="card"><b>Kropssammensætning (${esc(fatL.d)})</b><br>${kg ? kg + ' kg · ' : ''}fedt ${fatL.v.toFixed(1)} %${kg ? ' (≈ ' + (kg * fatL.v / 100).toFixed(1) + ' kg fedt, ' + (kg * (1 - fatL.v / 100)).toFixed(1) + ' kg fedtfri)' : ''}${mu ? ' · muskelmasse ' + mu.v + ' kg' + tag(mu) : ''}${bo ? ' · knogler ' + bo.v + ' kg' + tag(bo) : ''}${wa ? ' · vand ' + wa.v + ' %' + tag(wa) : ''}<br><span class="mut">Tal fra vægte (bioimpedans) svinger med væskebalance – se på trenden over uger, ikke enkeltdage.</span></div>`; }
+  // tabel: 14 dage
+  const rows = []; for (let i = 0; i < 14; i++) { const d = ymd(addD(new Date(), -i)), x = H[d] || {}, w = S.weights.find(v => v.date === d); rows.push([d, w ? w.kg : null, (w && w.fat) || x.fat || null, x.restingHR, x.hrv || x.hrvSDNN, x.sleepH, x.steps]); }
+  const c = v => v == null ? '–' : (typeof v === 'number' ? (Number.isInteger(v) ? v : Math.round(v * 10) / 10) : v);
+  h += `<div class="card"><b>Seneste 14 dage</b><table class="tight"><tr><td></td><td>kg</td><td>fedt%</td><td>hvile</td><td>HRV</td><td>søvn</td><td>skridt</td></tr>${rows.map(r => `<tr><td>${esc(r[0].slice(5))}</td>${r.slice(1).map(v => `<td>${c(v)}</td>`).join('')}</tr>`).join('')}</table></div>`;
+  const hdr = S.keys.icu ? 'Basic ' + btoa('API_KEY:' + S.keys.icu) : '';
+  h += `<details class="wk"><summary>Sådan får du data ind</summary>
+    <p><b>Garmin-vægt (anbefalet, automatisk):</b> Vej dig på Garmin-vægten, så havner målingen i Garmin Connect. Slå i Intervals.icu (Settings → Connections → Garmin) download af wellness-/sundhedsdata til (navnet kan variere), og tryk “Hent fra Intervals.icu” her. Garmin har ikke en åben adgang til private apps, så Intervals.icu er mellemleddet. Intervals.icu gemmer typisk vægt og kropsfedt; muskel-, knogle- og vandmasse kommer kun med via CSV fra Garmin Connect (Vægt-rapporten → eksportér).</p>
+    <p><b>Apple Sundhed – to veje:</b><br>1) <i>Automatisk:</i> Apples sundhedsdata kan ikke læses af en webapp. Brug appen Genveje: lav en Automatisering (fx kl. 07:30 hver dag) der finder dagens værdier i Apple Sundhed (fx hvilepuls, HRV, skridt, søvn) og sender dem med “Hent indhold fra URL” (metode PUT) til <code>https://intervals.icu/api/v1/athlete/0/wellness/ÅÅÅÅ-MM-DD</code> med header <code>Authorization</code> og en JSON-krop som <code>{"restingHR":52,"hrvSDNN":58,"steps":9400}</code>. Så henter appen dem fra Intervals.icu. Send kun felter, Garmin ikke allerede leverer – sender begge det samme felt, vinder den sidste skrivning. Jeg kan ikke teste Genveje herfra, så handlingsnavne og feltnavne kan afvige lidt.<br>2) <i>Fil:</i> Sundhed → din profil → Eksportér alle sundhedsdata → vælg filen ovenfor. Eksporten er stor (ofte flere hundrede MB) og læses i bidder; på en telefon kan det tage et par minutter. Zip64 (over 4 GB) understøttes ikke – pak ud og vælg export.xml.</p>
+    <p>${S.keys.icu ? `<button data-act="showauth">${showAuth ? 'Skjul' : 'Vis'} Authorization-header til genvejen</button>${showAuth ? `<pre>${esc(hdr)}</pre><span class="mut">Indeholder din API-nøgle – del den ikke.</span>` : ''}` : '<span class="mut">Læg din Intervals.icu-nøgle ind under Indstillinger for at få headeren til genvejen.</span>'}</p>
+    <p class="mut">Ved samme dato vælges kilde i rækkefølgen: egen indtastning, Garmin-fil, Intervals.icu, Apple-eksport.</p></details>`;
+  return h;
+}
+
+// ---------- ZONER ----------
+function viewZones() {
+  const z = S.zoneResult; let h = `<div class="row"><button data-act="zones" class="pri">Zone-agent: tjek mine zoner</button></div>
+    <label class="chk"><input type="checkbox" data-act="autozone" ${S.autoZone ? 'checked' : ''}> Tjek automatisk når appen åbnes og seneste tjek er over 7 dage gammelt (foreslår kun – anvender aldrig uden dit klik)</label>`;
+  if (!z) return h + `<p class="mut">Henter dine løb fra de seneste 12 uger i Intervals.icu og sammenligner med dine zoneindstillinger.${S.lastZoneCheck ? ' Seneste tjek: ' + esc(S.lastZoneCheck.slice(0, 10)) : ''}</p>`;
+  const f = z.final, c = z.cur;
+  h += `<div class="card"><b>Nu → foreslået</b><table><tr><td>Tærskelpace</td><td>${mmss(c.thr)}/km</td><td>→ <b>${mmss(f.thr)}/km</b></td></tr>
+    <tr><td>LTHR</td><td>${c.lthr}</td><td>→ <b>${f.lthr}</b></td></tr><tr><td>Maxpuls</td><td>${c.maxhr}</td><td>→ <b>${f.maxhr}</b></td></tr>
+    <tr><td>Puls-zoner (øvre grænse)</td><td colspan="2">${f.zones.join(' · ')}</td></tr></table></div>`;
+  h += `<div class="card"><b>Evidens</b> (${z.ev.runsAnalysed} løb)<ul>${z.det.why.length ? z.det.why.map(w => `<li>${esc(w)}</li>`).join('') : '<li>Ingen stærk evidens for ændring.</li>'}</ul>
+    ${z.ev.w20 ? `<span class="mut">Bedste 20 min: ${mmss(1000 / z.ev.w20.speed)}/km${z.ev.w20.hr ? ', gns. puls ' + Math.round(z.ev.w20.hr) : ''} (${esc(z.ev.w20src)})</span><br>` : ''}
+    ${z.ev.raceSrc ? `<span class="mut">Løbsresultat: ${esc(z.ev.raceSrc)}</span><br>` : ''}
+    ${z.ev.streamsFailed ? `<span class="mut">${z.ev.streamsFailed} aktivitetsstrømme kunne ikke hentes.</span>` : ''}</div>`;
+  if (z.agent) h += `<div class="card">${z.agent.error ? 'Zone-agent fejlede: ' + esc(z.agent.error) : `<b>Zone-agent</b>: ${z.agent.verdict === 'hold' ? 'hold zonerne' : z.agent.accepted ? 'foreslår opdatering' : 'forslag afvist af sikkerhedsgrænser – bruger regelbaseret forslag'}<br>${esc(z.agent.rationale)}`}</div>`;
+  h += z.changed ? `<button data-act="applyzones" class="pri">Anvend i Intervals.icu og genopbyg plan</button><p class="mut">Workouts er skrevet som % af tærskelpace, så alle fremtidige pas følger de nye zoner. Garmin henter ændringen ved næste sync.</p>` : `<p class="mut">Ingen ændring nødvendig.</p>`;
+  return h;
+}
+
+// ---------- INDSTILLINGER ----------
+function viewSettings() {
+  const P = S.profile, K = S.keys, N = S.nutrition;
+  return `<form id="setf"><div class="card"><h3>Løb</h3>
+    <label>Nuværende km/uge<input name="weeklyKm" type="number" min="5" max="150" value="${P.weeklyKm}"></label>
+    <label>Hvor mange gange løber du pr. uge nu?<input name="currentRuns" type="number" min="1" max="7" value="${P.currentRuns}"></label>
+    <label>Tærskelpace (m:ss /km) – cirka 1-times-løbepace<input name="thr" value="${esc(P.thr)}" pattern="\\d{1,2}:\\d{2}"></label>
+    <label>LTHR<input name="lthr" type="number" value="${P.lthr}"></label><label>Maxpuls<input name="maxHr" type="number" value="${P.maxHr}"></label>
+    <div>Dage du kan løbe<br>${dayChecks('runDays', P.runDays)}</div>
+    <label>Langtur-dag<select name="longDay">${MON_FIRST.map(d => `<option value="${d}" ${P.longDay === d ? 'selected' : ''}>${DOW[d]}</option>`).join('')}</select></label></div>
+    <div class="card"><h3>Styrketræning</h3>
+    <div>Styrkedage (${(N.strengthDays || []).length} pr. uge)<br>${dayChecks('strengthDays', N.strengthDays)}</div>
+    <div>Hvilke af dem er tunge underkropsdage? (kvalitetsløb lægges ikke på dagen eller dagen efter)<br>${dayChecks('lowerDays', P.lowerDays)}</div></div>
+    <div class="card"><h3>Kost og krop</h3>
+    <label>Køn (til energiberegning)<select name="sex"><option value="" ${N.sex ? '' : 'selected'}>Vælg…</option><option value="m" ${N.sex === 'm' ? 'selected' : ''}>Mand</option><option value="k" ${N.sex === 'k' ? 'selected' : ''}>Kvinde</option></select></label>
+    <div class="trio"><label>Alder<input name="age" type="number" value="${N.age || ''}"></label><label>Højde cm<input name="heightCm" type="number" value="${N.heightCm || ''}"></label><label>Vægt kg<input name="weightKg" type="number" step="0.1" value="${N.weightKg || ''}"></label></div>
+    <label>Mål<select name="goal"><option value="maintain" ${N.goal === 'maintain' ? 'selected' : ''}>Vedligehold vægt</option><option value="lose" ${N.goal === 'lose' ? 'selected' : ''}>Tab fedt (forsigtigt)</option><option value="gain" ${N.goal === 'gain' ? 'selected' : ''}>Tag på</option></select></label>
+    <div class="trio"><label>Målvægt kg<input name="goalWeightKg" type="number" step="0.1" value="${N.goalWeightKg || ''}"></label><label>Tempo kg/uge<input name="rateKgWk" type="number" step="0.05" min="0.1" max="0.5" value="${N.rateKgWk}"></label><label>Personer i husstanden<input name="people" type="number" min="1" max="8" value="${N.people}"></label></div>
+    <div>Arbejdsdage (ingen frokost planlægges)<br>${dayChecks('workdays', N.workdays)}</div>
+    <label>Frokost på arbejde, ca. kcal<input name="lunchKcal" type="number" value="${N.lunchKcal}"></label>
+    <label>Kostønsker / allergier / ting du ikke spiser<input name="prefs" value="${esc(N.prefs)}" placeholder="fx vegetar, ingen fisk, laktoseintolerant"></label>
+    <p class="mut">Vægttab planlægges kun forsigtigt (maks 0,5 % af kropsvægt pr. uge), aldrig tæt på A-løbet og aldrig mod en målvægt med BMI under 20. Appen er ikke et lægeligt værktøj – ved sygdom, graviditet eller spiseproblemer: tal med din læge.</p></div>
+    <div class="card"><h3>Backup</h3><p class="mut">Alle dine data ligger kun i denne browser. Tag en backup jævnligt og gem filen i iCloud Drive, OneDrive eller lignende. ${S.lastBackup ? 'Seneste backup: ' + esc(S.lastBackup.slice(0, 10)) + '.' : 'Ingen backup endnu.'}</p>
+    <label class="chk"><input type="checkbox" id="bk_keys"> Medtag API-nøgler (kun hvis filen gemmes et privat sted)</label>
+    <div class="row"><button type="button" data-act="backup" class="pri">Hent backup</button></div>
+    <label>Gendan fra backup-fil (erstatter data i denne browser)<input id="restorefile" type="file" accept=".json,application/json"></label><div class="row"><button type="button" data-act="restore">Gendan</button></div></div>
+    <div class="card"><h3>Forbindelser</h3><p class="mut">Gemmes kun i denne browser (localStorage). Foto og madplan sendes til Anthropic via din nøgle.</p>
+    <label>Intervals.icu API-nøgle<input name="icu" type="password" value="${esc(K.icu)}" autocomplete="off"></label>
+    <label>Athlete ID (0 = den nøglen tilhører)<input name="athlete" value="${esc(K.athlete)}"></label>
+    <label>Anthropic API-nøgle (til agenterne og fotovurdering)<input name="anthropic" type="password" value="${esc(K.anthropic)}" autocomplete="off"></label>
+    <label>Model<input name="model" value="${esc(K.model)}"></label></div>
+    <button class="pri">Gem</button></form>`;
+}
+
+function render() {
+  const tabs = [['plan', 'Plan'], ['events', 'Events'], ['kost', 'Kost'], ['weight', 'Vægt'], ['health', 'Helbred'], ['zones', 'Zoner'], ['settings', 'Indstil.']];
+  const body = { plan: viewPlan, events: viewEvents, kost: viewKost, weight: viewWeight, health: viewHealth, zones: viewZones, settings: viewSettings }[S.tab]();
+  $('#app').innerHTML = `<h1>Løbecoach</h1><nav>${tabs.map(([k, l]) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}">${l}</button>`).join('')}</nav>
+    ${backupDue() ? `<div class="card warn">Du har data, men ingen nylig backup. <button data-act="backup">Hent backup</button></div>` : ''}${busy ? `<div class="card busy">${esc(busy)}…</div>` : ''}${msg ? `<div class="card ${msg.kind === 'err' ? 'bad' : 'good'}">${esc(msg.text)}</div>` : ''}${body}`;
+}
+
+// ---------- FOTO ----------
+function fileToB64(file) {
+  return new Promise((res, rej) => {
+    const fr = () => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = () => rej(new Error('Kunne ikke læse billedet.')); r.readAsDataURL(file); };
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      try {
+        const s = Math.min(1, 1280 / Math.max(img.width, img.height)), c = document.createElement('canvas'); c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+        const g = c.getContext('2d'); if (!g) return fr(); g.drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url); res(c.toDataURL('image/jpeg', 0.85).split(',')[1]);
+      } catch (e) { fr(); }
+    };
+    img.onerror = () => rej(new Error('Kunne ikke læse billedet.')); img.src = url;
+  });
+}
+const slotNow = () => { const h = new Date().getHours(); return h < 10 ? 'morgenmad' : h < 14 ? 'frokost' : h < 20 ? 'aftensmad' : 'snack'; };
+
+// ---------- EVENTS ----------
+document.addEventListener('click', e => {
+  const kt = e.target.closest('[data-ktab]'); if (kt) { S.kostTab = kt.dataset.ktab; save(); return render(); }
+  const t = e.target.closest('[data-tab],[data-act]'); if (!t) return;
+  if (t.dataset.tab) { S.tab = t.dataset.tab; msg = null; save(); return render(); }
+  const a = t.dataset.act;
+  if (a === 'gen') run('Bygger plan', async () => { rebuild(); S.review = null; });
+  if (a === 'review') run('Plan-agent gennemgår planen', async () => { S.review = await planAgentReview(S.plan); });
+  if (a === 'applyreview') run('Genopbygger', async () => { S.review.overrides.forEach(o => { S.overrides[o.monday] = { ...(S.overrides[o.monday] || {}), volume_factor: o.volume_factor, max_quality: o.max_quality }; }); S.review = null; rebuild(); msg = { kind: 'ok', text: 'Justeringer anvendt – upload planen for at sende den til Intervals.icu.' }; });
+  if (a === 'upload') run('Uploader til Intervals.icu', async () => { const r = await uploadPlan(S.plan); msg = { kind: 'ok', text: `${r.uploaded} pas sendt til Intervals.icu${r.removed ? ', ' + r.removed + ' forældede fjernet' : ''}.` }; });
+  if (a === 'delev') { S.events = S.events.filter(x => String(x.id) !== t.dataset.id); save(); try { rebuild(); } catch (er) { S.plan = null; } render(); }
+  if (a === 'zones') run('Zone-agent analyserer', async () => { S.zoneResult = await zoneAgentRun(); S.lastZoneCheck = S.zoneResult.at; });
+  if (a === 'applyzones') run('Opdaterer zoner', async () => { await applyZones(S.zoneResult); rebuild(); const r = await uploadPlan(S.plan); S.zoneResult = null; msg = { kind: 'ok', text: `Zoner opdateret i Intervals.icu. Plan genopbygget og ${r.uploaded} pas sendt.` }; });
+  if (a === 'autozone') { S.autoZone = t.checked; save(); }
+  // kost
+  if (a === 'estimate') {
+    const f = $('#photo') && $('#photo').files && $('#photo').files[0]; if (!f) return note('err', 'Vælg eller tag et billede først.');
+    const hint = ($('#photohint') || {}).value || '';
+    run('Vurderer måltidet', async () => { const b64 = await fileToB64(f); const r = await foodPhotoAgent(b64, 'image/jpeg', hint); draft = { ...r, src: 'foto', slot: slotNow() }; if (!r.items.length) msg = { kind: 'err', text: 'Jeg kunne ikke se mad på billedet. Prøv et nyt billede, eller tilføj manuelt.' }; });
+  }
+  if (a === 'manual') { draft = { name: '', slot: slotNow(), kcal: 0, p: 0, c: 0, f: 0, src: 'manuel', items: [] }; render(); }
+  if (a === 'canceldraft') { draft = null; render(); }
+  if (a === 'delfood') { S.food = S.food.filter(x => String(x.id) !== t.dataset.id); save(); render(); }
+  if (a === 'menu') run('Mad-agenten laver madplanen', async () => { await generateMenu(ymd(addD(new Date(), 1))); const bad = S.menu.check.filter(c => c.flag).length; msg = { kind: bad ? 'err' : 'ok', text: bad ? `Madplan lavet, men ${bad} dag(e) afviger fra målet – se advarslen.` : 'Madplan lavet. Tjek Indkøb for listen.' }; });
+  if (a === 'shop') { S.shopChecked[t.dataset.key] = t.checked; save(); render(); }
+  if (a === 'copyshop') { const txt = aggregateShopping(S.menu, S.nutrition.people || 1).map(e => `- ${e.name}: ${fmtQty(e)}`).join('\n'); (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(() => note('ok', 'Indkøbslisten er kopieret.'), () => note('err', 'Kunne ikke kopiere – markér listen manuelt.')); }
+  // vægt
+  if (a === 'delw') { S.weights = S.weights.filter(w => w.date !== t.dataset.date); save(); render(); }
+  if (a === 'applyoffset') { S.nutrition.kcalOffset = Number(t.dataset.d); S.menu = null; save(); note('ok', 'Kalorie-justeringen er gemt. Lav madplanen igen for at bruge de nye mål.'); }
+  if (a === 'syncicu') run('Henter fra Intervals.icu', async () => { try { const r = await syncIntervalsWellness(); msg = { kind: 'ok', text: `${r.rows} dage hentet: ${r.weights} vægtmålinger, ${r.fields} sundhedsfelter opdateret.` }; } catch (er) { S.sync = { ...(S.sync || {}), error: er.message }; throw er; } });
+  if (a === 'readgarmin') { const f = $('#garminfile') && $('#garminfile').files && $('#garminfile').files[0]; if (!f) return note('err', 'Vælg Garmin-filen først.');
+    run('Læser Garmin-fil', async () => { const g = parseGarminCsv(await f.text()); const first = g.days[g.from];
+      pending = { kind: 'garmin', days: g.days, count: g.count, from: g.from, to: g.to, found: g.columns.join(', '), unmapped: g.unmapped, sample: `${g.from}: ${first.kg.toFixed(1)} kg${first.fat ? ', fedt ' + first.fat.toFixed(1) + ' %' : ''}` }; }); }
+  if (a === 'readapple') { const f = $('#applefile') && $('#applefile').files && $('#applefile').files[0]; if (!f) return note('err', 'Vælg Apple-eksporten først.');
+    run('Læser Apple-eksport (kan tage et par minutter)', async () => { let last = 0; const r = await parseAppleExport(f, { onProgress: n => { if (n - last > 25e6) { last = n; busy = `Læser Apple-eksport… ${Math.round(n / 1e6)} MB`; render(); } } });
+      const keys = new Set(); Object.values(r.days).forEach(d => Object.keys(d).forEach(k => keys.add(k))); const names = { kg: 'vægt', fat: 'kropsfedt', leanKg: 'fedtfri masse', restingHR: 'hvilepuls', hrvSDNN: 'HRV', steps: 'skridt', sleepH: 'søvn' };
+      const e = r.days[r.to]; pending = { kind: 'apple', days: r.days, count: r.count, from: r.from, to: r.to, records: r.records, found: [...keys].map(k => names[k] || k).join(', '), sample: `${r.to}: ` + Object.entries(e).map(([k, v]) => `${names[k] || k} ${Math.round(v * 10) / 10}`).join(', ') }; }); }
+  if (a === 'confirmimport') { const r = applyImport(pending); pending = null; save(); note('ok', `Importeret: ${r.weights} vægtmålinger og ${r.fields} sundhedsfelter.`); }
+  if (a === 'cancelimport') { pending = null; render(); }
+  if (a === 'showauth') { showAuth = !showAuth; render(); }
+  if (a === 'backup') { const withKeys = !!($('#bk_keys') && $('#bk_keys').checked), b = new Blob([makeBackup(withKeys)], { type: 'application/json' }), u = URL.createObjectURL(b), l = document.createElement('a');
+    l.href = u; l.download = `lobecoach-backup-${todayStr()}.json`; l.click(); URL.revokeObjectURL(u); S.lastBackup = new Date().toISOString(); save(); note('ok', 'Backup hentet – gem filen et sikkert sted.'); }
+  if (a === 'restore') { const f = $('#restorefile') && $('#restorefile').files && $('#restorefile').files[0]; if (!f) return note('err', 'Vælg en backup-fil først.');
+    if (!confirm('Det erstatter dine nuværende data i denne browser med indholdet af backuppen. Fortsæt?')) return;
+    run('Gendanner', async () => { const r = restoreBackup(await f.text()); msg = { kind: 'ok', text: `Gendannet: ${r.weights} vægtmålinger, ${r.food} madlog-poster, ${r.events} events.` }; }); }
+  if (a === 'weighics') { const b = new Blob([weighIcs(weighDays(S.profile, S.nutrition))], { type: 'text/calendar' }), u = URL.createObjectURL(b), l = document.createElement('a'); l.href = u; l.download = 'vejedage.ics'; l.click(); URL.revokeObjectURL(u); }
+});
+
+document.addEventListener('change', e => {
+  const t = e.target.closest('[data-act]'); if (!t) return; const a = t.dataset.act;
+  if (a === 'runsmode') run('Genopbygger plan', async () => { S.profile.runsMode = t.value; rebuild(); msg = { kind: 'ok', text: `Planen er genopbygget med ${S.plan.runsInfo.target} løbepas pr. uge. Upload den for at opdatere Intervals.icu.` }; });
+  if (a === 'weekruns') run('Genopbygger plan', async () => { const m = t.dataset.mon, o = S.overrides[m] || {}; if (t.value) o.runs = Number(t.value); else delete o.runs; if (Object.keys(o).length) S.overrides[m] = o; else delete S.overrides[m]; rebuild(); });
+});
+
+document.addEventListener('submit', e => {
+  e.preventDefault(); const f = new FormData(e.target), id = e.target.id;
+  if (id === 'evf') {
+    const dist = f.get('dist') === 'custom' ? Number(f.get('custom')) : Number(f.get('dist')), goal = String(f.get('goal') || '').trim();
+    if (!(dist > 0)) return note('err', 'Angiv en distance.');
+    if (goal && !/^\d{1,2}(:\d{2}){1,2}$/.test(goal)) return note('err', 'Måltid skal være mm:ss eller t:mm:ss.');
+    S.events.push({ id: Date.now(), name: f.get('name'), date: f.get('date'), distKm: dist, goal, prio: f.get('prio') });
+    S.overrides = {}; S.review = null; S.menu = null; save();
+    try { rebuild(); S.tab = 'plan'; save(); note('ok', 'Event tilføjet og plan genberegnet – tjek Plan og upload.'); } catch (er) { note('err', er.message); }
+  }
+  if (id === 'draftf') {
+    const kcal = Number(f.get('kcal')); if (!(kcal > 0)) return note('err', 'Angiv kcal.');
+    S.food.push({ id: Date.now(), date: todayStr(), name: String(f.get('name')), slot: String(f.get('slot')), kcal, p: Number(f.get('p')) || 0, c: Number(f.get('c')) || 0, f: Number(f.get('f')) || 0, src: draft.src });
+    draft = null; save(); render();
+  }
+  if (id === 'wf') {
+    const kg = Number(f.get('kg')); if (!(kg >= 30 && kg <= 250)) return note('err', 'Angiv en vægt mellem 30 og 250 kg.');
+    S.weights = mergeWeight(S.weights, { date: String(f.get('date')), kg, src: 'manuel' }); save(); render();
+  }
+  if (id === 'setf') {
+    const P = S.profile, K = S.keys, N = S.nutrition;
+    P.weeklyKm = Number(f.get('weeklyKm')); P.currentRuns = Number(f.get('currentRuns')) || 3; P.thr = String(f.get('thr')); P.lthr = Number(f.get('lthr')); P.maxHr = Number(f.get('maxHr'));
+    P.runDays = f.getAll('runDays').map(Number); P.longDay = Number(f.get('longDay')); P.lowerDays = f.getAll('lowerDays').map(Number);
+    N.strengthDays = f.getAll('strengthDays').map(Number); N.workdays = f.getAll('workdays').map(Number);
+    N.sex = String(f.get('sex')); N.age = Number(f.get('age')) || 0; N.heightCm = Number(f.get('heightCm')) || 0; N.weightKg = Number(f.get('weightKg')) || 0;
+    N.goal = String(f.get('goal')); N.goalWeightKg = Number(f.get('goalWeightKg')) || 0; N.rateKgWk = Math.min(0.5, Math.max(0.1, Number(f.get('rateKgWk')) || 0.3)); N.people = Math.max(1, Number(f.get('people')) || 1);
+    N.lunchKcal = Number(f.get('lunchKcal')) || 650; N.prefs = String(f.get('prefs')).trim();
+    K.icu = String(f.get('icu')).trim(); K.athlete = String(f.get('athlete')).trim() || '0'; K.anthropic = String(f.get('anthropic')).trim(); K.model = String(f.get('model')).trim() || 'claude-sonnet-5-5';
+    if (P.runDays.length < 2) return note('err', 'Vælg mindst to løbedage.');
+    if (!P.runDays.includes(P.longDay)) return note('err', 'Langtur-dagen skal være en af dine løbedage.');
+    if (S.plan) { try { rebuild(); } catch (er) { /* planen bygges igen fra Plan-fanen */ } }
+    save(); note('ok', 'Gemt.');
+  }
+});
+
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* ikke understøttet */ }
+render();
+if (S.keys.icu && (!S.sync || !S.sync.last || Date.now() - new Date(S.sync.last) > 6 * 36e5)) { syncIntervalsWellness().then(() => { save(); render(); }, er => { S.sync = { ...(S.sync || {}), error: er.message }; save(); }); }
+if (S.autoZone && S.keys.icu && (!S.lastZoneCheck || Date.now() - new Date(S.lastZoneCheck) > 7 * DAY)) { S.tab = 'zones'; run('Zone-agent tjekker zoner (ugentligt)', async () => { S.zoneResult = await zoneAgentRun(); S.lastZoneCheck = S.zoneResult.at; }); }
+
+</script></body></html>
