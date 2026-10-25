@@ -574,7 +574,7 @@ const LSK = 'lobecoach.v1';
 const DEF = {
   profile: { weeklyKm: 30, thr: '4:35', runDays: [1, 2, 3, 4, 5, 6, 0], longDay: 0, lowerDays: [], maxHr: 190, lthr: 172, runsMode: 'auto', currentRuns: 3 },
   nutrition: { sex: '', age: 0, heightCm: 0, weightKg: 0, goal: 'maintain', goalWeightKg: 0, rateKgWk: 0.3, lunchKcal: 650, people: 1, workdays: [1, 2, 3, 4, 5], strengthDays: [1, 3, 5], kcalOffset: 0, prefs: '' },
-  weights: [], food: [], menu: null, shopChecked: {}, health: {}, sync: { last: null, error: null }, lastBackup: null,
+  weights: [], measures: [], food: [], menu: null, shopChecked: {}, health: {}, sync: { last: null, error: null }, lastBackup: null,
   events: [], overrides: {}, plan: null, review: null, zoneResult: null, lastZoneCheck: null, autoZone: false, tab: 'plan', kostTab: 'idag',
   keys: { athlete: '0', icu: '', anthropic: '', model: 'claude-sonnet-5-5' }
 };
@@ -827,7 +827,7 @@ function rebuild() {
 const dayChecks = (name, arr) => MON_FIRST.map(d => `<label class="chk"><input type="checkbox" name="${name}" value="${d}" ${arr.includes(d) ? 'checked' : ''}> ${DOW[d]}</label>`).join(' ');
 
 // ---------- BACKUP ----------
-const BACKUP_KEYS = ['profile', 'nutrition', 'weights', 'food', 'menu', 'shopChecked', 'health', 'events', 'overrides', 'autoZone', 'lastZoneCheck'];
+const BACKUP_KEYS = ['profile', 'nutrition', 'weights', 'measures', 'food', 'menu', 'shopChecked', 'health', 'events', 'overrides', 'autoZone', 'lastZoneCheck'];
 function makeBackup(withKeys) {
   const data = {}; BACKUP_KEYS.forEach(k => { data[k] = S[k]; }); if (withKeys) data.keys = S.keys;
   return JSON.stringify({ app: 'lobecoach', version: 1, exported: new Date().toISOString(), data });
@@ -836,16 +836,17 @@ function restoreBackup(text) {
   let j; try { j = JSON.parse(text); } catch (e) { throw new Error('Filen er ikke en gyldig backup (kan ikke læses).'); }
   if (!j || j.app !== 'lobecoach' || !j.data || typeof j.data !== 'object') throw new Error('Det er ikke en Løbecoach-backup.');
   const d = j.data, isObj = v => v && typeof v === 'object' && !Array.isArray(v);
-  for (const k of ['weights', 'food', 'events']) if (k in d && !Array.isArray(d[k])) throw new Error(`Backuppen er beskadiget (${k}).`);
+  for (const k of ['weights', 'measures', 'food', 'events']) if (k in d && !Array.isArray(d[k])) throw new Error(`Backuppen er beskadiget (${k}).`);
   for (const k of ['profile', 'nutrition', 'health', 'overrides', 'shopChecked']) if (k in d && !isObj(d[k])) throw new Error(`Backuppen er beskadiget (${k}).`);
   if ('weights' in d) d.weights = d.weights.filter(w => w && /^\d{4}-\d{2}-\d{2}$/.test(w.date) && w.kg >= 30 && w.kg <= 250);
+  if ('measures' in d) d.measures = d.measures.filter(m => m && /^\d{4}-\d{2}-\d{2}$/.test(m.date));
   for (const k of BACKUP_KEYS) if (k in d) S[k] = (k === 'profile' || k === 'nutrition') ? { ...DEF[k], ...d[k] } : d[k];
   if (isObj(d.keys)) S.keys = { ...S.keys, ...d.keys };
   S.plan = null; S.review = null; S.zoneResult = null; draft = null; pending = null;
   try { rebuild(); } catch (e) { /* ingen A-event endnu */ }
   return { weights: S.weights.length, food: S.food.length, events: S.events.length };
 }
-const backupDue = () => (S.weights.length || S.food.length || Object.keys(S.health || {}).length) && (!S.lastBackup || Date.now() - new Date(S.lastBackup) > 14 * DAY);
+const backupDue = () => (S.weights.length || (S.measures || []).length || S.food.length || Object.keys(S.health || {}).length) && (!S.lastBackup || Date.now() - new Date(S.lastBackup) > 14 * DAY);
 
 // ---------- PLAN ----------
 function viewPlan() {
@@ -965,6 +966,25 @@ function weightChart(ws) {
   return `<svg viewBox="0 0 320 130" class="chart"><polyline fill="none" stroke="var(--line)" stroke-width="1" points="${w.map((p, i) => X(xs[i]) + ',' + Y(p.kg)).join(' ')}"/>${w.map((p, i) => `<circle cx="${X(xs[i])}" cy="${Y(p.kg)}" r="2.5" fill="var(--mut)"/>`).join('')}
     <polyline fill="none" stroke="var(--pri)" stroke-width="2.5" points="${ma.map((p, i) => X(xs[i]) + ',' + Y(p.kg)).join(' ')}"/><text x="10" y="126" font-size="9" fill="var(--mut)">${y0.toFixed(1)}–${y1.toFixed(1)} kg · blå = 7-dages gennemsnit</text></svg>`;
 }
+const MEAS = [['waist', 'Talje (ved navlen)'], ['belly', 'Mave (det bredeste)'], ['chest', 'Bryst'], ['hip', 'Hofte/balder'], ['thigh', 'Lår'], ['arm', 'Overarm'], ['neck', 'Hals']];
+function measCard() {
+  const ms = [...(S.measures || [])].sort((a, b) => a.date.localeCompare(b.date));
+  let h = `<form id="mf" class="card"><h3>Log mål (cm)</h3><label>Dato<input name="date" type="date" value="${todayStr()}" required></label>
+    <div class="trio">${MEAS.map(([k, n]) => `<label>${n}<input name="${k}" type="number" step="0.1" min="10" max="250" inputmode="decimal"></label>`).join('')}</div>
+    <div class="row"><button class="pri">Gem mål</button></div>
+    <span class="mut">Udfyld kun det, du måler. Mål med målebånd mod bar hud, afslappet (efter udånding), samme sted hver gang, og gerne samme ugedag som vejningen. Talje og mave er de vigtigste at følge – de siger mere om fedttab end vægten alene.</span></form>`;
+  if (!ms.length) return h;
+  const last = f => { const x = [...ms].reverse().find(m => m[f] > 0); return x ? { d: x.date, v: x[f] } : null; };
+  const first = f => { const x = ms.find(m => m[f] > 0); return x ? { d: x.date, v: x[f] } : null; };
+  const prev = f => { const xs = ms.filter(m => m[f] > 0); return xs.length > 1 ? xs[xs.length - 2] : null; };
+  const df = (n, base) => { const d = Math.round((n - base) * 10) / 10; return d === 0 ? '±0' : (d > 0 ? '+' : '−') + Math.abs(d).toString().replace('.', ','); };
+  const rows = MEAS.map(([k, n]) => { const l = last(k); if (!l) return ''; const f = first(k), p = prev(k);
+    return `<tr><td>${n}</td><td>${l.v} cm</td><td>${p ? df(l.v, p[k]) : '–'}</td><td>${f.d !== l.d ? df(l.v, f.v) : '–'}</td></tr>`; }).join('');
+  h += `<div class="card"><b>Mål – udvikling</b><table class="tight"><tr><td></td><td>seneste</td><td>siden sidst</td><td>siden start</td></tr>${rows}</table>
+    <span class="mut">Seneste måling: ${esc(ms[ms.length - 1].date)}. Negative tal (−) er tabte cm.</span></div>`;
+  h += [...ms].reverse().slice(0, 8).map(m => `<div class="ev"><div>${esc(m.date)} · ${MEAS.filter(([k]) => m[k] > 0).map(([k, n]) => `${n.split(' ')[0].toLowerCase()} <b>${m[k]}</b>`).join(' · ')}</div><button data-act="delm" data-date="${esc(m.date)}">Slet</button></div>`).join('');
+  return h;
+}
 function viewWeight() {
   const N = S.nutrition, ws = [...S.weights].sort((a, b) => b.date.localeCompare(a.date)), days = weighDays(S.profile, N), tr = weightTrend(S.weights);
   const todayW = days.includes(new Date().getDay()), has = S.weights.some(w => w.date === todayStr());
@@ -973,6 +993,7 @@ function viewWeight() {
       Dagene er valgt, så de ikke ligger dagen efter langtur eller tung underkropstræning (vand og glykogen giver udsving). Se på 7-dages gennemsnittet, ikke enkeltmålinger.
       <div class="row"><button data-act="weighics">Hent kalender-påmindelse (.ics)</button></div></div>`;
   h += weightChart(S.weights);
+  h += measCard();
   if (tr && tr.perWeek != null) {
     const r = weeklyReview(N, S.weights, S.plan);
     h += `<div class="card"><b>Trend</b><br>${esc(r.text)}${r.delta ? `<br><button data-act="applyoffset" class="pri" data-d="${r.newOffset}">Justér kalorier ${r.delta > 0 ? '+' : ''}${r.delta} kcal/dag</button>` : ''}${N.kcalOffset ? `<br><span class="mut">Nuværende justering: ${N.kcalOffset > 0 ? '+' : ''}${N.kcalOffset} kcal/dag</span>` : ''}</div>`;
@@ -1118,6 +1139,7 @@ document.addEventListener('click', e => {
   if (a === 'copyshop') { const txt = aggregateShopping(S.menu, S.nutrition.people || 1).map(e => `- ${e.name}: ${fmtQty(e)}`).join('\n'); (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(() => note('ok', 'Indkøbslisten er kopieret.'), () => note('err', 'Kunne ikke kopiere – markér listen manuelt.')); }
   // vægt
   if (a === 'delw') { S.weights = S.weights.filter(w => w.date !== t.dataset.date); save(); render(); }
+  if (a === 'delm') { S.measures = (S.measures || []).filter(m => m.date !== t.dataset.date); save(); render(); }
   if (a === 'applyoffset') { S.nutrition.kcalOffset = Number(t.dataset.d); S.menu = null; save(); note('ok', 'Kalorie-justeringen er gemt. Lav madplanen igen for at bruge de nye mål.'); }
   if (a === 'syncicu') run('Henter fra Intervals.icu', async () => { try { const r = await syncIntervalsWellness(); msg = { kind: 'ok', text: `${r.rows} dage hentet: ${r.weights} vægtmålinger, ${r.fields} sundhedsfelter opdateret.` }; } catch (er) { S.sync = { ...(S.sync || {}), error: er.message }; throw er; } });
   if (a === 'readgarmin') { const f = $('#garminfile') && $('#garminfile').files && $('#garminfile').files[0]; if (!f) return note('err', 'Vælg Garmin-filen først.');
@@ -1162,6 +1184,13 @@ document.addEventListener('submit', e => {
   if (id === 'wf') {
     const kg = Number(f.get('kg')); if (!(kg >= 30 && kg <= 250)) return note('err', 'Angiv en vægt mellem 30 og 250 kg.');
     S.weights = mergeWeight(S.weights, { date: String(f.get('date')), kg, src: 'manuel' }); save(); render();
+  }
+  if (id === 'mf') {
+    const date = String(f.get('date')), m = { date };
+    for (const [k] of MEAS) { const v = Number(String(f.get(k) || '').replace(',', '.')); if (v) { if (!(v >= 10 && v <= 250)) return note('err', 'Mål skal være mellem 10 og 250 cm.'); m[k] = v; } }
+    if (Object.keys(m).length < 2) return note('err', 'Udfyld mindst ét mål.');
+    const old = (S.measures || []).find(x => x.date === date); S.measures = (S.measures || []).filter(x => x.date !== date); S.measures.push({ ...(old || {}), ...m });
+    S.measures.sort((a, b) => a.date.localeCompare(b.date)); save(); render();
   }
   if (id === 'setf') {
     const P = S.profile, K = S.keys, N = S.nutrition;
