@@ -2,8 +2,8 @@
 <html lang="da"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Løbecoach</title>
 <style>
-:root{--bg:#f6f6f8;--fg:#1c1c22;--mut:#6b6b78;--card:#fff;--line:#dcdce3;--pri:#1d6fe0;--good:#e6f4ea;--warn:#fff4dc;--bad:#fde7e7}
-@media(prefers-color-scheme:dark){:root{--bg:#141418;--fg:#ececf1;--mut:#9a9aa8;--card:#1e1e25;--line:#33333d;--pri:#5b9cf5;--good:#183324;--warn:#3a2f14;--bad:#3d1c1c}}
+:root{--bg:#f6f6f8;--fg:#1c1c22;--mut:#6b6b78;--card:#fff;--line:#dcdce3;--pri:#1d6fe0;--good:#e6f4ea;--warn:#fff4dc;--bad:#fde7e7;--figfill:#d3e3fb}
+@media(prefers-color-scheme:dark){:root{--bg:#141418;--fg:#ececf1;--mut:#9a9aa8;--card:#1e1e25;--line:#33333d;--pri:#5b9cf5;--good:#183324;--warn:#3a2f14;--bad:#3d1c1c;--figfill:#28426b}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif}
 #app{max-width:760px;margin:0 auto;padding:16px 16px 60px}h1{font-size:22px;margin:4px 0 12px}h3{margin:0 0 8px}
 nav{display:flex;gap:6px;margin-bottom:14px;overflow:auto}nav button{flex:1;white-space:nowrap}
@@ -1052,6 +1052,54 @@ function weightChart(ws) {
     <polyline fill="none" stroke="var(--pri)" stroke-width="2.5" points="${ma.map((p, i) => X(xs[i]) + ',' + Y(p.kg)).join(' ')}"/><text x="10" y="126" font-size="9" fill="var(--mut)">${y0.toFixed(1)}–${y1.toFixed(1)} kg · blå = 7-dages gennemsnit</text></svg>`;
 }
 const MEAS = [['waist', 'Talje (ved navlen)'], ['belly', 'Mave (det bredeste)'], ['chest', 'Bryst'], ['hip', 'Hofte/balder'], ['thigh', 'Lår'], ['arm', 'Overarm'], ['neck', 'Hals']];
+// ---- Figur ud fra omkredsmål (skematisk, ikke et foto) ----
+let figDate = null;
+const FIG_DEF = { m: { neck: .21, chest: .55, waist: .47, hip: .54, thigh: .31, arm: .17 }, k: { neck: .18, chest: .50, waist: .40, hip: .55, thigh: .32, arm: .15 } };
+function figValues(ms, date, H, sex) { // seneste kendte værdi pr. felt til og med datoen; ellers typisk værdi ud fra højde
+  const d = FIG_DEF[sex === 'k' ? 'k' : 'm'], v = {}, est = {};
+  for (const [k] of MEAS) { const m = [...ms].reverse().find(x => x.date <= date && x[k] > 0); if (m) v[k] = m[k]; else { est[k] = true; v[k] = k === 'belly' ? null : Math.round(d[k] * H); } }
+  if (v.belly == null) v.belly = Math.round(v.waist * 1.03);
+  return { v, est };
+}
+function smoothPath(pts, close) { // Catmull-Rom → kubiske Bézier-kurver
+  let p = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i - 1] || pts[i], b = pts[i], c = pts[i + 1], e = pts[i + 2] || c;
+    p += `C${(b[0] + (c[0] - a[0]) / 6).toFixed(1)},${(b[1] + (c[1] - a[1]) / 6).toFixed(1)} ${(c[0] - (e[0] - b[0]) / 6).toFixed(1)},${(c[1] - (e[1] - b[1]) / 6).toFixed(1)} ${c[0].toFixed(1)},${c[1].toFixed(1)}`;
+  }
+  return p + (close ? 'Z' : '');
+}
+function figShapes(v, H, cx) { // returnerer {torso, legs[], arms[], head, y} i SVG-enheder (380 enheder = H cm)
+  const s = 380 / H, Y = f => 10 + f * 380, cx0 = cx, torsoW = c => c * 0.36 * s / 2, limbW = c => c / Math.PI * s;
+  const sh = Math.max(0.25 * H * s / 2, torsoW(v.chest) * 1.02), nk = limbW(v.neck) / 2, ch = torsoW(v.chest), wa = torsoW(v.waist), be = torsoW(v.belly), hi = torsoW(v.hip);
+  const right = [[cx0 + nk, Y(.14)], [cx0 + nk * 1.2, Y(.17)], [cx0 + sh, Y(.2)], [cx0 + ch, Y(.28)], [cx0 + wa, Y(.4)], [cx0 + be, Y(.44)], [cx0 + hi, Y(.52)]];
+  const left = right.map(([x, y]) => [2 * cx0 - x, y]).reverse();
+  const torso = smoothPath(right.concat([[cx0 + hi * .55, Y(.545)], [cx0, Y(.55)], [2 * cx0 - (cx0 + hi * .55), Y(.545)]], left), true);
+  const tw = limbW(v.thigh), leg = sgn => { const x0 = cx0 + sgn * Math.max(tw / 2 + 1, hi * .96 - tw / 2), w = [tw, tw * .88, tw * .62, tw * .5, tw * .4];
+    const ys = [.53, .62, .73, .86, .97]; const outer = ys.map((y, i) => [x0 + sgn * (w[i] / 2) + sgn * (i ? 0 : 0), Y(y)]), inner = ys.map((y, i) => [x0 - sgn * (w[i] / 2) * (i ? 1 : 1) + (i ? sgn * w[i] * .0 : 0), Y(y)]).reverse();
+    return smoothPath(outer, false) + 'L' + inner[0][0].toFixed(1) + ',' + inner[0][1].toFixed(1) + smoothPath(inner, false).replace(/^M[^C]*/, '') + 'Z'; };
+  const aw = limbW(v.arm), arm = sgn => `M${(cx0 + sgn * (sh - aw * .35)).toFixed(1)},${Y(.215)}L${(cx0 + sgn * (Math.max(hi, ch) + aw * .9)).toFixed(1)},${Y(.49)}`;
+  return { torsoR: right, torso, legs: [leg(1), leg(-1)], arms: [arm(1), arm(-1)], armW: aw, head: { cx: cx0, cy: Y(.065), r: 0.058 * 380 }, neck: { x: cx0 - nk, y: Y(.115), w: nk * 2, h: Y(.17) - Y(.115) }, Y };
+}
+function figCard(ms, N) {
+  if (!ms.length) return '';
+  const H = N.heightCm > 120 ? N.heightCm : 180, dates = ms.map(m => m.date), sel = dates.includes(figDate) ? figDate : dates[dates.length - 1], firstD = dates[0], cx = 95;
+  const A = figValues(ms, sel, H, N.sex), B = figValues(ms, firstD, H, N.sex), a = figShapes(A.v, H, cx), b = figShapes(B.v, H, cx), showCmp = sel !== firstD;
+  const lvl = { neck: .15, chest: .28, waist: .4, belly: .44, hip: .52, thigh: .62, arm: .33 }, df = x => { const d = Math.round(x * 10) / 10; return d === 0 ? '' : ' (' + (d > 0 ? '+' : '−') + Math.abs(d).toString().replace('.', ',') + ')'; };
+  const sides = g => { const pts = g.torsoR, mir = p => [2 * cx - p[0], p[1]]; return smoothPath(pts, false) + ' ' + smoothPath(pts.map(mir), false); };
+  const draw = (g, fill, stroke, sw, dash) => { const st = `stroke="${stroke}" stroke-width="${sw}"${dash ? ' stroke-dasharray="3 3"' : ''} stroke-linejoin="round"`;
+    return `<g>${g.arms.map(p => `<path d="${p}" fill="none" stroke="${stroke}" stroke-width="${(g.armW + 2 * sw).toFixed(1)}" stroke-linecap="round" ${dash ? 'stroke-dasharray="3 3"' : ''}/>`).join('')}${fill === 'none' ? '' : g.arms.map(p => `<path d="${p}" fill="none" stroke="${fill}" stroke-width="${g.armW.toFixed(1)}" stroke-linecap="round"/>`).join('')}
+    ${g.legs.map(p => `<path d="${p}" fill="${fill}" ${st}/>`).join('')}<rect x="${g.neck.x.toFixed(1)}" y="${g.neck.y.toFixed(1)}" width="${g.neck.w.toFixed(1)}" height="${g.neck.h.toFixed(1)}" fill="${fill}" stroke="none"/><circle cx="${g.head.cx}" cy="${g.head.cy.toFixed(1)}" r="${g.head.r.toFixed(1)}" fill="${fill}" ${st}/>
+    <path d="${g.torso}" fill="${fill}" stroke="none"/><path d="${sides(g)}" fill="none" ${st}/></g>`; };
+  const want = MEAS.map(([k, n]) => ({ k, n, y: 10 + lvl[k] * 380 })).sort((p, q) => p.y - q.y); want.forEach((l, i) => { if (i && l.y < want[i - 1].y + 17) l.y = want[i - 1].y + 17; });
+  const labels = want.map(l => `<line x1="${(cx + 52).toFixed(0)}" y1="${(10 + lvl[l.k] * 380).toFixed(0)}" x2="160" y2="${(l.y - 3).toFixed(0)}" stroke="var(--line)" stroke-width="1"/><text x="164" y="${l.y.toFixed(0)}" font-size="10" fill="var(--fg)">${l.n.split(' ')[0].split('/')[0]} ${A.v[l.k]}${A.est[l.k] ? '*' : ''}${showCmp && !A.est[l.k] && !B.est[l.k] ? df(A.v[l.k] - B.v[l.k]) : ''}</text>`).join('');
+  const w = [...S.weights].sort((x, y) => x.date.localeCompare(y.date)).filter(x => x.date <= sel).pop();
+  return `<div class="card"><b>Din figur</b> <span class="mut">(skematisk ud fra dine mål)</span>
+    <label>Måling<select data-act="figsel">${[...dates].reverse().map(d => `<option value="${esc(d)}" ${d === sel ? 'selected' : ''}>${esc(d)}${d === firstD ? ' (første)' : ''}</option>`).join('')}</select></label>
+    <svg viewBox="0 0 270 400" class="chart" style="max-width:340px;display:block;margin:6px auto" role="img" aria-label="Skematisk figur ud fra omkredsmål">
+      ${showCmp ? draw(b, 'none', 'var(--mut)', 1.2, true) : ''}${draw(a, 'var(--figfill)', 'var(--pri)', 1.6, false)}${labels}</svg>
+    <span class="mut">${w ? esc(w.date) + ': ' + w.kg + ' kg · ' : ''}Højde ${H} cm. ${showCmp ? 'Stiplet streg = første måling.' : 'Vælg en senere måling for at sammenligne med den første.'} ${Object.keys(A.est).length ? '* = ikke målt endnu, vist som typisk værdi for din højde.' : ''} Figuren er en forenklet tegning, ikke et billede af dig – forskelle mellem målinger er det, der er interessant.</span></div>`;
+}
 function measCard() {
   const ms = [...(S.measures || [])].sort((a, b) => a.date.localeCompare(b.date));
   let h = `<form id="mf" class="card"><h3>Log mål (cm)</h3><label>Dato<input name="date" type="date" value="${todayStr()}" required></label>
@@ -1067,6 +1115,7 @@ function measCard() {
     return `<tr><td>${n}</td><td>${l.v} cm</td><td>${p ? df(l.v, p[k]) : '–'}</td><td>${f.d !== l.d ? df(l.v, f.v) : '–'}</td></tr>`; }).join('');
   h += `<div class="card"><b>Mål – udvikling</b><table class="tight"><tr><td></td><td>seneste</td><td>siden sidst</td><td>siden start</td></tr>${rows}</table>
     <span class="mut">Seneste måling: ${esc(ms[ms.length - 1].date)}. Negative tal (−) er tabte cm.</span></div>`;
+  h += figCard(ms, S.nutrition);
   h += [...ms].reverse().slice(0, 8).map(m => `<div class="ev"><div>${esc(m.date)} · ${MEAS.filter(([k]) => m[k] > 0).map(([k, n]) => `${n.split(' ')[0].toLowerCase()} <b>${m[k]}</b>`).join(' · ')}</div><button data-act="delm" data-date="${esc(m.date)}">Slet</button></div>`).join('');
   return h;
 }
@@ -1195,7 +1244,7 @@ async function sendCoach(text) {
   setTimeout(() => { const f = $('#cf'); if (f && f.scrollIntoView) f.scrollIntoView({ block: 'end' }); }, 0);
 }
 
-const APP_VERSION = '2026-10-25 d (netværk)';
+const APP_VERSION = '2026-10-25 f (figur)';
 function render() {
   const tabs = [['plan', 'Plan'], ['events', 'Events'], ['kost', 'Kost'], ['weight', 'Vægt'], ['coach', 'Coach'], ['health', 'Helbred'], ['zones', 'Zoner'], ['settings', 'Indstil.']];
   const body = { plan: viewPlan, events: viewEvents, kost: viewKost, weight: viewWeight, coach: viewCoach, health: viewHealth, zones: viewZones, settings: viewSettings }[S.tab]();
@@ -1277,6 +1326,7 @@ document.addEventListener('click', e => {
 
 document.addEventListener('change', e => {
   const t = e.target.closest('[data-act]'); if (!t) return; const a = t.dataset.act;
+  if (a === 'figsel') { figDate = t.value; render(); }
   if (a === 'runsmode') run('Genopbygger plan', async () => { S.profile.runsMode = t.value; rebuild(); msg = { kind: 'ok', text: `Planen er genopbygget med ${S.plan.runsInfo.target} løbepas pr. uge. Upload den for at opdatere Intervals.icu.` }; });
   if (a === 'weekruns') run('Genopbygger plan', async () => { const m = t.dataset.mon, o = S.overrides[m] || {}; if (t.value) o.runs = Number(t.value); else delete o.runs; if (Object.keys(o).length) S.overrides[m] = o; else delete S.overrides[m]; rebuild(); });
 });
